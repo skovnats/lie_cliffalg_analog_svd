@@ -1766,12 +1766,12 @@ The BSS metric layer includes:
 
 ### `src/lie_svd_benchmarks.rs`
 
-`0.34.0`: standard, world-recognized "evil matrix" and BSS benchmarks,
-applied to this crate's own solvers rather than left as a synthetic-only
-test suite. Prompted directly by the question of whether standard
-benchmarks for bad matrices/signals exist in the wider field (they do) and
-whether this crate holds up against them (checked here, honestly, rather
-than assumed).
+`0.34.0`, extended in `0.35.0`: standard, world-recognized "evil matrix" and
+BSS benchmarks, applied to this crate's own solvers rather than left as a
+synthetic-only test suite. Prompted directly by the question of whether
+standard benchmarks for bad matrices/signals exist in the wider field (they
+do) and whether this crate holds up against them (checked here, honestly,
+rather than assumed).
 
 **Why not just compare against LAPACK.** This crate deliberately has no
 LAPACK/BLAS/faer dependency (see `bin/stress_cpu.rs`'s own doc comment and
@@ -1805,14 +1805,21 @@ strong a check it gives:
    `extreme_ill_conditioned_profile_stays_within_absolute_error_across_full_spectrum`)
    rather than reimplementing the LAPACK-style "controlled spectrum"
    generator that already existed.
-3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`): no external
-   ground truth is available, or -- for `hilbert_matrix` past the size
-   where its condition number exceeds `f64`'s representable range -- no
-   ground truth is even representable in double precision. Orthogonality
-   of the recovered bases and reconstruction accuracy are what's actually
-   checkable; claiming machine-precision recovery of singular values
-   smaller than the matrix's own rounding error would be false regardless
-   of which solver computed them.
+3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`, and, added in
+   `0.35.0`, `frank_matrix`/`forsythe_matrix`/`cauchy_matrix`): no external
+   ground truth is available, or -- for `hilbert_matrix`/`cauchy_matrix`
+   past the size where their condition number exceeds `f64`'s representable
+   range -- no ground truth is even representable in double precision.
+   Orthogonality of the recovered bases and reconstruction accuracy are
+   what's actually checkable; claiming machine-precision recovery of
+   singular values smaller than the matrix's own rounding error would be
+   false regardless of which solver computed them.
+4. **Known asymptotic clustering** (`parter_matrix`, added in `0.35.0`):
+   not a closed form for individual singular values, but a real, citable
+   fact from the literature (Parter's own result; also a standard example
+   in Trefethen & Bau's *Numerical Linear Algebra*) -- almost all singular
+   values cluster near `pi` as `n` grows. See the `0.35.0` notes below for
+   the measured fractions.
 
 **A test that was corrected after measuring, not before.** The first
 version of the `ExtremeIllConditioned` check (`kappa=1e18`, deliberately
@@ -1875,17 +1882,75 @@ this challenging for a covariance/lagged-statistics method.
 SuiteSparse/Matrix Market and Cardoso's own JADE/SOBI EEG/MEG benchmark
 datasets (both would require network downloads, breaking this project's
 established offline-reproducible `docker build --no-cache` pattern);
-Frank/Forsythe/Parter/Cauchy matrices (legitimate members of the Higham
-test suite, left for a future pass -- the three matrices implemented
-already cover three qualitatively different hard cases: near-rank-deficient
-triangular, extreme-condition-number symmetric, exact-degenerate
-symmetric; Frank's own distinguishing property, reciprocal eigenvalue
-pairs, is a nonsymmetric *eigenvalue* fact rather than a singular-value
-one, so it wouldn't add a new SVD-relevant failure mode this set doesn't
-already exercise); Trefethen pseudospectra (a genuinely relevant
-diagnostic for non-normal matrices, but a resolvent-norm-over-a-complex-grid
-computation is a visualization tool, not a pass/fail correctness check,
-and a substantially larger undertaking than this pass's scope).
+Trefethen pseudospectra (a genuinely relevant diagnostic for non-normal
+matrices, but a resolvent-norm-over-a-complex-grid computation is a
+visualization tool, not a pass/fail correctness check, and a substantially
+larger undertaking than this pass's scope, still in the backlog).
+Frank/Forsythe/Parter/Cauchy, originally scoped out in `0.34.0` for the
+same "left for a future pass" reason, were added in `0.35.0` (below).
+
+**`0.35.0` additions: the rest of the Higham set, plus a parametric BSS
+grid.**
+
+`frank_matrix` (upper Hessenberg, `det=1`, `F[i,j]=n-j` for `j>=i`,
+`F[i,i-1]=n-i` on the subdiagonal, `0`-indexed): famous for eigenvalues in
+ill-conditioned reciprocal pairs, but that's a *nonsymmetric eigenvalue*
+fact, not a singular-value one, so it gives this crate's SVD solvers no
+closed form to check against either -- self-consistency is what's actually
+available, same as `kahan_matrix`. Measured at `n=16,32,64`:
+`orth_u`/`orth_v` up to `~9e-14`, `rel_recon` up to `~7e-15` -- no sign of
+difficulty despite the matrix's famously ill-conditioned eigenvalues.
+
+`forsythe_matrix(n, lambda, alpha)` (a Jordan block with `lambda` on the
+diagonal, `1` on the superdiagonal, perturbed by one small entry `alpha` in
+the bottom-left corner): deliberately close to defective/non-diagonalizable
+-- a bare Jordan block has one eigenvalue with a single eigenvector, and
+the corner perturbation only barely fixes that (`n` distinct eigenvalues,
+the `n`-th roots of `alpha`, but still extremely sensitive to further
+perturbation). Measured (`lambda=0`, `alpha=1e-6`) rather than assumed:
+`LieSvdSmall::solve` -- polar decomposition plus Jacobi, not an eigenvalue
+algorithm -- reaches essentially *exact* results (`orth_u`/`orth_v`/
+`rel_recon` at literal `0` for `n<=32`, still `~1e-16`/`~5e-23` at `n=64`).
+Worth stating plainly: this construction's near-defectiveness is exactly
+what makes *eigenvalue* algorithms struggle, and a polar-decomposition-based
+SVD route simply isn't exposed to that particular failure mode the same
+way.
+
+`parter_matrix` (`P[i,j] = 1/(i-j+0.5)`): the one addition checked against
+an actual citable fact from the literature rather than only
+self-consistency -- Parter's own result (also a standard Toeplitz-matrix
+example in Trefethen & Bau, *Numerical Linear Algebra*) that almost all
+singular values cluster tightly near `pi` as `n` grows.
+`parter_matrix_singular_values_cluster_near_pi` measures the fraction
+within `0.05` of `pi` directly: `13/16` (`81.25%`), `29/32` (`90.6%`),
+`61/64` (`95.3%`) at `n=16,32,64` -- increasing with `n`, exactly the
+asymptotic clustering the literature describes, not a coincidence at one
+size. The test's threshold (`>75%`) sits safely under the worst
+(smallest-`n`) measured fraction.
+
+`cauchy_matrix` (`C[i,j] = 1/(i+j+2)`, the default `x=y=1..n` case of
+`gallery('cauchy', x, y)`): symmetric PD and, like the Hilbert matrix,
+extremely ill-conditioned by construction, but with a different entry
+structure -- a second, independently-constructed instance of the same
+graceful-degradation question `hilbert_matrix` answers.
+`cauchy_matrix_degrades_gracefully_past_double_precision_limits` measures
+`n=6,10,16`: `kappa` grows past `f64`'s representable range by `n=16`
+(the same underflow-in-the-ratio symptom seen with Hilbert), while
+`orth_u`/`orth_v`/`rel_recon` stay at `~1e-14` throughout, unaffected.
+
+`amari_index_improves_across_a_channel_by_condition_number_grid` extends
+the single `kappa=1e7` BSS check to a `channels in {4,8} x kappa in
+{1e3,1e5,1e7}` grid (`6` cells, each its own independent random seed --
+`synthetic_sources` generalizes the single hand-written `4`-channel source
+set from `amari_index_is_small_after_bss_on_ill_conditioned_mixing` to
+arbitrary channel counts via a `i % 4` pattern cycle). Separation improves
+the Amari index at all `6` points, but measured, not smoothed into a
+cleaner story than is actually there: the improvement is *not* monotonic in
+`kappa` (`channels=4` lands worse at `kappa=1e5` than at `kappa=1e7`) --
+expected sampling variation with one seed per cell, reported as such rather
+than glossed over, and not asserted as a trend the test would need to
+enforce (the test only asserts `after < before` at each cell, which is what
+was actually measured to hold everywhere).
 
 ### `src/lie_svd_tensor.rs`
 

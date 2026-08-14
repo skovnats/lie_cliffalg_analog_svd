@@ -1,5 +1,57 @@
 # Release Notes
 
+## 0.35.0
+
+A compact stabilization cycle closing the two items `0.34.0` explicitly
+left open, plus a README pass.
+
+- **The rest of the Higham "evil matrix" set** (`frank_matrix`,
+  `forsythe_matrix`, `parter_matrix`, `cauchy_matrix`), completing the four
+  matrices `0.34.0` had scoped out rather than dropped. Frank (upper
+  Hessenberg, `det=1`, famous for ill-conditioned reciprocal eigenvalue
+  pairs — an eigenvalue fact, not a singular-value one, so self-consistency
+  is what's checked): measured `orth_u`/`orth_v` up to `~9e-14`, `rel_recon`
+  up to `~7e-15` at `n=16,32,64`. Forsythe (a Jordan block plus one small
+  corner perturbation, deliberately close to defective): measured
+  essentially *exact* recovery (`0` at `n<=32`, `~1e-16`/`~5e-23` at
+  `n=64`) — this construction's near-defectiveness troubles eigenvalue
+  algorithms, not an SVD route built on polar decomposition. Parter
+  (`1/(i-j+0.5)`): checked against the actual citable literature fact it's
+  known for — almost all singular values cluster near `pi` as `n` grows —
+  measured `81.25%`/`90.6%`/`95.3%` within `0.05` of `pi` at `n=16,32,64`,
+  increasing with `n` exactly as the asymptotic result predicts, not just
+  generic self-consistency. Cauchy (`1/(i+j+2)`): a second, independently-
+  constructed extreme-ill-conditioning example alongside the Hilbert
+  matrix, same graceful-degradation result (`orth`/`rel_recon` steady at
+  `~1e-14` through `n=16` despite `kappa` exceeding `f64`'s representable
+  range there too).
+- **Amari index parametric grid**: extends the single `kappa=1e7` BSS check
+  to `channels in {4,8} x kappa in {1e3,1e5,1e7}` (`6` cells, each its own
+  independent random seed, not cherry-picked). Separation improves the
+  Amari index at all `6` points, but *not* monotonically in `kappa`
+  (`channels=4` is worse at `kappa=1e5` than at `kappa=1e7`) — reported as
+  measured, since with one seed per cell that's expected sampling
+  variation, not evidence that higher `kappa` reliably hurts separation:
+
+  | channels | kappa | before | after |
+  | -------: | ----: | -----: | ----: |
+  | 4 | 1e3 | 3.88e-1 | 6.46e-4 |
+  | 4 | 1e5 | 4.94e-1 | 2.03e-1 |
+  | 4 | 1e7 | 5.21e-1 | 5.08e-2 |
+  | 8 | 1e3 | 3.31e-1 | 5.40e-2 |
+  | 8 | 1e5 | 3.33e-1 | 1.14e-1 |
+  | 8 | 1e7 | 3.39e-1 | 1.50e-1 |
+
+- **README**: avatar image and a synced short-description tagline added at
+  the top of the file.
+
+Trefethen pseudospectra remain in the backlog, as before -- a diagnostic
+visualization tool, not a pass/fail check, and a substantially larger
+undertaking than either of the two items above.
+
+141/141 tests pass (129 carried over from `0.34.0` plus 12 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
 ## 0.34.0
 
 Validation against standard, world-recognized "evil matrix" and BSS

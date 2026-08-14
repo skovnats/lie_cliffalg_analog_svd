@@ -1,4 +1,12 @@
 # lie_cliffalg_analog_svd
+
+<p align="center"><img src="avatar.png" alt="Clifford phase-rotor geometry" width="100%"></p>
+
+Rust research prototype: dense SVD, joint diagonalization, and tabular fits
+organized by Clifford phase-rotor geometry. Ordinary `f64` storage, geometry
+in the update laws. Exports rotor schedules for MZI meshes. Not a LAPACK
+replacement.
+
 ## TL;DR
 
 Rust research prototype for dense numerical linear algebra, organized around one
@@ -50,10 +58,6 @@ and Part II (tables and heterogeneous coupling). DOIs below.
 
 - Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra); [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
 - Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II); [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
-
-<p align="center">
-  <img src="avatar.png" alt="Clifford phase-rotor geometry for numerical linear algebra" width="100%">
-</p>
 
 ---
 
@@ -298,6 +302,22 @@ that were gradually made more conservative and testable:
   Parter/Cauchy matrices and Trefethen pseudospectra were considered and
   left for a future pass rather than silently dropped. See the 0.34.0
   section below.
+- **The rest of the Higham set, plus a parametric BSS grid:** `0.35.0`
+  closes two of `0.34.0`'s own explicitly-left-open items. Frank
+  (self-consistency, `orth`/`rel_recon` to `~1e-14`), Forsythe (a
+  near-defective Jordan block plus one corner perturbation — measured
+  essentially *exact*, `0` to `~1e-16`, since this crate's polar-
+  decomposition-based SVD route isn't exposed to the near-defectiveness
+  that troubles eigenvalue algorithms), Parter (checked against its actual
+  literature-known property — singular values clustering near `pi`,
+  measured `81%->95%` as `n` grows from `16` to `64`), and Cauchy (a
+  second, independent extreme-ill-conditioning example alongside Hilbert,
+  same graceful-degradation result). The Amari-index BSS check was also
+  extended from one `kappa=1e7` point to a `channels x kappa` grid
+  (`{4,8} x {1e3,1e5,1e7}`): separation improves the index at all `6`
+  cells, though — reported as measured, not smoothed — not monotonically
+  in `kappa`. Trefethen pseudospectra remain in the backlog. See the
+  0.35.0 section below.
 
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
@@ -383,20 +403,27 @@ keeps the simpler fast path.
   shared Phase-JADE rotor field, and returns an unmixing matrix plus separated
   channels. It also reports `Channel Phase Coherence` and a simple SIR estimate
   helper for synthetic benchmarks.
-- `lie_svd_benchmarks`: `0.34.0`, world-recognized "evil matrix" and BSS
-  benchmarks applied to this crate's own solvers. `kahan_matrix`,
-  `hilbert_matrix`, and `pei_matrix` (the last with *exact* closed-form
-  eigenvalues, `alpha+n` once and `alpha` with multiplicity `n-1` — real
-  external ground truth, and a genuine degenerate-spectrum stress test at
-  small `alpha`); `amari_index`, the standard permutation/scale-invariant
-  BSS quality metric (Amari, Cichocki & Yang 1996), applied to `LieSvdBss`
-  on a `kappa=1e7` near-collinear mixing case. Also wires this crate's own
-  `profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum` (which
-  already carried exact imposed `sigma_ref`) into real `cargo test`
+- `lie_svd_benchmarks`: `0.34.0`, extended in `0.35.0`, world-recognized
+  "evil matrix" and BSS benchmarks applied to this crate's own solvers.
+  `kahan_matrix`, `hilbert_matrix`, `frank_matrix`, `forsythe_matrix`,
+  `cauchy_matrix` (self-consistency checked — no closed form available or,
+  for `hilbert_matrix`/`cauchy_matrix` past `f64`'s representable
+  condition-number range, even representable); `pei_matrix` (*exact*
+  closed-form eigenvalues, `alpha+n` once and `alpha` with multiplicity
+  `n-1` — real external ground truth, and a genuine degenerate-spectrum
+  stress test at small `alpha`); `parter_matrix` (checked against the
+  actual literature fact it's known for — singular values clustering near
+  `pi`, measured `81-95%` within `0.05` of `pi` as `n` grows from `16` to
+  `64`); `amari_index`, the standard permutation/scale-invariant BSS
+  quality metric (Amari, Cichocki & Yang 1996), applied to `LieSvdBss` both
+  on a single `kappa=1e7` near-collinear mixing case and across a
+  `channels x kappa` parametric grid (`0.35.0`). Also wires this crate's
+  own `profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum`
+  (which already carried exact imposed `sigma_ref`) into real `cargo test`
   assertions for the first time, rather than only `stress_cpu`'s CLI
   display. No LAPACK/BLAS/faer reference SVD is used, by this crate's own
   design — see the module's own doc comment for exactly what ground truth
-  each benchmark uses instead, and what was explicitly scoped out
+  each benchmark uses instead, and what remains explicitly scoped out
   (SuiteSparse, Cardoso's EEG/MEG datasets, Trefethen pseudospectra) rather
   than silently skipped.
 - `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes

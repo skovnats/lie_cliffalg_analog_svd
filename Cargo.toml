@@ -1,6 +1,6 @@
 [package]
 name = "lie_cliffalg_analog_svd"
-version = "0.34.0"
+version = "0.35.0"
 edition = "2021"
 authors = ["Lie/Clifford Analog SVD contributors...Dr. Artiom A. Kovnatsky++"]
 license-file = "License"
