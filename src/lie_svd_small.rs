@@ -321,6 +321,100 @@ impl LieSvdSmall {
         let vt = v.t().to_owned();
         (u, sigma, vt)
     }
+
+    /// Economy ("thin") SVD of a general `n x d` matrix (any aspect ratio),
+    /// via `QR` reduction to a `min(n,d) x min(n,d)` square factor followed
+    /// by this module's exact square solve. Returns `U: n x k`,
+    /// `sigma: length k`, `Vt: k x d`, `k = min(n, d)` — deliberately the
+    /// thin shape, not the full `n x n` / `d x d` shapes
+    /// `lie_svd_phaseflow`'s rectangular route uses, since for the common
+    /// tabular case (`n` samples `>> d` features) a full `n x n` U would be
+    /// mostly wasted storage.
+    ///
+    /// Why QR and not `X^T X`: `R` (the QR factor) and `X` share the same
+    /// singular values, because `Q` has orthonormal columns — QR does not
+    /// square the condition number the way forming `X^T X` does (see the
+    /// module doc comment above). This routes the "avoid squaring" argument
+    /// through an actual rectangular solve instead of stating it and then
+    /// squaring anyway.
+    pub fn solve_rectangular(mat: &Array2<f64>) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+        let n = mat.nrows();
+        let d = mat.ncols();
+        assert!(
+            n > 0 && d > 0,
+            "LieSvdSmall::solve_rectangular: empty input"
+        );
+        if n == d {
+            return Self::solve(mat);
+        }
+        if d > n {
+            // SVD(X) from SVD(X^T): swap U and V, transpose Vt back to V-major.
+            let (u_t, sigma, vt_t) = Self::solve_rectangular(&mat.t().to_owned());
+            return (vt_t.t().to_owned(), sigma, u_t.t().to_owned());
+        }
+        // n > d here: the common tall/tabular case.
+        let (q, r) = qr_reduce(mat);
+        let (ur, sigma, vt) = Self::solve(&r);
+        let u = q.dot(&ur);
+        (u, sigma, vt)
+    }
+}
+
+/// Rectangular QR via modified Gram-Schmidt (more numerically stable than
+/// classical Gram-Schmidt against cancellation, though still not as robust
+/// as Householder reflections on severely rank-deficient input — adequate
+/// here because the result only feeds a follow-up exact square solve, not a
+/// final answer on its own). `mat`: `n x d` with `n >= d`. Returns
+/// `Q: n x d` (orthonormal columns) and `R: d x d` (upper triangular) with
+/// `mat ~= Q R`. A column that is (numerically) linearly dependent on the
+/// ones before it gets an exact zero pivot and a zero `Q` column, rather
+/// than an arbitrary injected direction — consistent with genuine rank
+/// deficiency in `mat` instead of hiding it.
+fn qr_reduce(mat: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
+    let n = mat.nrows();
+    let d = mat.ncols();
+    let mut q = Array2::<f64>::zeros((n, d));
+    let mut r = Array2::<f64>::zeros((d, d));
+    let mut v = Array2::<f64>::zeros((n, d));
+    // Scale for the rank-deficiency check below: an absolute cutoff (e.g.
+    // `norm >= 1e-300`) only catches an exactly-zero pivot. A column that is
+    // numerically dependent on the ones before it (residual norm tiny
+    // *relative to the column's own original scale*, but not literally
+    // zero, e.g. `1e-14` against an original norm of `10`) would still pass
+    // an absolute check, get normalized anyway, and turn floating-point
+    // noise into an arbitrary "orthonormal" direction — not orthogonal to
+    // anything in practice, since it's built almost entirely from rounding
+    // error. Comparing against this matrix's own scale catches that case.
+    let mat_scale = mat.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-300);
+    let degenerate_floor = 1e-10 * mat_scale;
+    for j in 0..d {
+        for i in 0..n {
+            v[[i, j]] = mat[[i, j]];
+        }
+        for k in 0..j {
+            let mut dot = 0.0_f64;
+            for i in 0..n {
+                dot += q[[i, k]] * v[[i, j]];
+            }
+            r[[k, j]] = dot;
+            for i in 0..n {
+                v[[i, j]] -= dot * q[[i, k]];
+            }
+        }
+        let norm = (0..n).map(|i| v[[i, j]] * v[[i, j]]).sum::<f64>().sqrt();
+        r[[j, j]] = norm;
+        if norm >= degenerate_floor {
+            for i in 0..n {
+                q[[i, j]] = v[[i, j]] / norm;
+            }
+        }
+        // else: numerically dependent on earlier columns. Leave q[:,j] = 0
+        // and r[j,j] = norm (the tiny true residual, not zeroed out) — the
+        // resulting singular value from `solve(&r)` will be correspondingly
+        // tiny, so this direction contributes negligibly to reconstruction
+        // rather than injecting a noisy, falsely-orthonormal one.
+    }
+    (q, r)
 }
 
 #[cfg(test)]
@@ -343,6 +437,106 @@ mod tests {
         let uut_err = (&uut - &ident).mapv(|x| x * x).sum().sqrt();
         let vvt_err = (&vvt - &ident).mapv(|x| x * x).sum().sqrt();
         (recon_err, uut_err, vvt_err)
+    }
+
+    fn rectangular_reconstruction_and_orthogonality_err(a: &Array2<f64>) -> (f64, f64) {
+        let (u, sigma, vt) = LieSvdSmall::solve_rectangular(a);
+        let k = sigma.len();
+        let n = a.nrows();
+        let d = a.ncols();
+        assert_eq!(u.dim(), (n, k));
+        assert_eq!(vt.dim(), (k, d));
+        let mut sigma_mat = Array2::<f64>::zeros((k, k));
+        for i in 0..k {
+            sigma_mat[[i, i]] = sigma[i];
+        }
+        let recon = u.dot(&sigma_mat).dot(&vt);
+        let recon_err = (&recon - a).mapv(|x| x * x).sum().sqrt() / frobenius_norm(a).max(1e-300);
+        let uut = u.t().dot(&u);
+        let ident = Array2::<f64>::eye(k);
+        let uut_err = (&uut - &ident).mapv(|x| x * x).sum().sqrt();
+        (recon_err, uut_err)
+    }
+
+    #[test]
+    fn test_solve_rectangular_tall_dense_matrix() {
+        // The exact shapes that broke `lie_svd_phaseflow`'s rotor-based
+        // rectangular route (~96%/~51% reconstruction error): this QR-based
+        // path should reach machine precision on both instead. (An earlier
+        // version of this test used `sin((i*7+j*5+1)*0.31)*(1+j)` for the
+        // 30x3 case, which turned out to be accidentally near-rank-deficient
+        // — third singular value ~1e-16 — and its orthogonality assertion
+        // failed for exactly the reason `qr_reduce`'s doc comment predicts
+        // for unpivoted QR on rank-deficient input. A second deterministic
+        // formula hit the same accidental-collinearity problem again, so
+        // this uses random entries instead: astronomically unlikely to be
+        // exactly rank-deficient, unlike a hand-picked closed-form formula.
+        // The rank-deficient case has its own dedicated test below with a
+        // weaker, correct assertion.)
+        let mut rng = StdRng::seed_from_u64(2026);
+        let a30x3 = Array2::from_shape_fn((30, 3), |_| rng.gen_range(-1.0_f64..1.0));
+        let (err_a, orth_a) = rectangular_reconstruction_and_orthogonality_err(&a30x3);
+        assert!(err_a < 1e-10, "30x3 recon rel err={err_a:e}");
+        assert!(orth_a < 1e-10, "30x3 U orthogonality err={orth_a:e}");
+
+        let a20x15 = Array2::from_shape_fn((20, 15), |_| rng.gen_range(-1.0_f64..1.0));
+        let (err_b, orth_b) = rectangular_reconstruction_and_orthogonality_err(&a20x15);
+        assert!(err_b < 1e-10, "20x15 recon rel err={err_b:e}");
+        assert!(orth_b < 1e-10, "20x15 U orthogonality err={orth_b:e}");
+    }
+
+    #[test]
+    fn test_solve_rectangular_wide_matrix_via_transpose() {
+        // d > n: exercises the transpose branch.
+        let a = Array2::from_shape_fn((4, 11), |(i, j)| ((i * 5 + j * 3 + 2) as f64).cos());
+        let (err, orth) = rectangular_reconstruction_and_orthogonality_err(&a);
+        assert!(err < 1e-10, "wide recon rel err={err:e}");
+        assert!(orth < 1e-10, "wide U orthogonality err={orth:e}");
+    }
+
+    #[test]
+    fn test_solve_rectangular_matches_square_solve_on_square_input() {
+        let n = 12;
+        let mut rng = StdRng::seed_from_u64(42);
+        let a = Array2::from_shape_fn((n, n), |_| rng.gen_range(-1.0_f64..1.0));
+        let (u1, s1, vt1) = LieSvdSmall::solve(&a);
+        let (u2, s2, vt2) = LieSvdSmall::solve_rectangular(&a);
+        for i in 0..n {
+            assert!(
+                (s1[i] - s2[i]).abs() < 1e-10,
+                "sigma[{i}]: {} vs {}",
+                s1[i],
+                s2[i]
+            );
+        }
+        assert_eq!(u1.dim(), u2.dim());
+        assert_eq!(vt1.dim(), vt2.dim());
+    }
+
+    #[test]
+    fn test_solve_rectangular_handles_a_rank_deficient_column() {
+        // Column 2 is an exact duplicate of column 0: rank-deficient input
+        // must not produce NaN/Inf, and reconstruction must still hold.
+        let n = 20;
+        let mut a = Array2::<f64>::zeros((n, 3));
+        for i in 0..n {
+            let v = ((i * 11 + 3) as f64 * 0.23).sin() * 2.0;
+            a[[i, 0]] = v;
+            a[[i, 1]] = ((i * 13 + 7) as f64 * 0.41).cos();
+            a[[i, 2]] = v; // duplicate of column 0
+        }
+        let (u, sigma, vt) = LieSvdSmall::solve_rectangular(&a);
+        assert!(u.iter().all(|x| x.is_finite()));
+        assert!(sigma.iter().all(|x| x.is_finite()));
+        assert!(vt.iter().all(|x| x.is_finite()));
+        let k = sigma.len();
+        let mut sigma_mat = Array2::<f64>::zeros((k, k));
+        for i in 0..k {
+            sigma_mat[[i, i]] = sigma[i];
+        }
+        let recon = u.dot(&sigma_mat).dot(&vt);
+        let err = (&recon - &a).mapv(|x| x * x).sum().sqrt() / frobenius_norm(&a).max(1e-300);
+        assert!(err < 1e-8, "rank-deficient recon rel err={err:e}");
     }
 
     #[test]
