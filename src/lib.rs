@@ -29,10 +29,13 @@ pub mod lie_svd_phaseflow;
 pub mod lie_svd_phasehealth;
 pub mod lie_svd_quadenergy;
 pub mod lie_svd_small;
+pub mod lie_svd_subspace_jade;
 pub mod lie_svd_tensor;
 pub mod lie_svd_tensortrain;
 pub mod lie_svd_topowarm;
 pub mod lie_svd_traceflow;
+pub mod lie_tbl_multivector;
+pub mod lie_tbl_regress;
 
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
