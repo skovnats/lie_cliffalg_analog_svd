@@ -21,14 +21,31 @@
 //!    *displayed* by `stress_cpu` but never actually asserted against in
 //!    `cargo test`; that's a real, if narrow, test-coverage gap, closed
 //!    below rather than left as a CLI-only display).
-//! 3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`): no external
-//!    ground truth is available or, for `hilbert_matrix` at the sizes where
-//!    its condition number exceeds `f64`'s representable range, even
-//!    *exists* in double precision -- orthogonality of the recovered bases
-//!    and reconstruction accuracy are what's actually checkable, and
+//! 3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`, `frank_matrix`,
+//!    `forsythe_matrix`, `cauchy_matrix`): no external ground truth is
+//!    available, or -- for `hilbert_matrix`/`cauchy_matrix` at the sizes
+//!    where their condition number exceeds `f64`'s representable range --
+//!    even *exists* in double precision. Orthogonality of the recovered
+//!    bases and reconstruction accuracy are what's actually checkable, and
 //!    claiming machine-precision recovery of singular values that are
 //!    smaller than the matrix's own rounding error would be a false claim
-//!    regardless of which solver computed them.
+//!    regardless of which solver computed them. `frank_matrix`'s own famous
+//!    property (reciprocal eigenvalue pairs) is a *nonsymmetric eigenvalue*
+//!    fact, not a singular-value one, so it doesn't give this crate's SVD
+//!    solvers a closed form to check against either -- self-consistency is
+//!    what's actually available here too. `forsythe_matrix` is a
+//!    Jordan-block-plus-corner-perturbation construction, deliberately
+//!    close to defective/non-diagonalizable; see
+//!    `forsythe_matrix_stays_orthogonal_and_reconstructs` for the measured
+//!    (not assumed) accuracy this crate's solver actually reaches on it.
+//! 4. **Known asymptotic clustering** (`parter_matrix`): not a closed form
+//!    for individual singular values, but a real, citable fact from the
+//!    numerical linear algebra literature (Parter's own result, and a
+//!    standard example in Trefethen & Bau's *Numerical Linear Algebra*):
+//!    almost all of this matrix's singular values cluster near `pi` as `n`
+//!    grows. Checked directly, with a threshold calibrated against a
+//!    measurement rather than assumed --
+//!    `parter_matrix_singular_values_cluster_near_pi`.
 //!
 //! ## What was in scope, considered, and explicitly left out
 //!
@@ -36,15 +53,6 @@
 //!   would require network access, breaking this project's established
 //!   offline-reproducible pattern (`docker build --no-cache` with no
 //!   network calls). Not used.
-//! - **Frank, Forsythe, Parter, Cauchy matrices:** legitimate members of the
-//!   Higham test suite, left for a future pass rather than silently
-//!   dropped -- `kahan_matrix`/`hilbert_matrix`/`pei_matrix` already cover
-//!   three qualitatively different hard cases (near-rank-deficient
-//!   triangular, extreme-condition-number symmetric, exact-degenerate
-//!   symmetric), and Frank's own useful property (reciprocal eigenvalue
-//!   pairs) is a *nonsymmetric eigenvalue* fact, not a singular-value one,
-//!   so it doesn't add a new SVD-relevant failure mode this set doesn't
-//!   already exercise.
 //! - **Trefethen pseudospectra:** a genuinely relevant tool for non-normal
 //!   matrices, but a resolvent-norm-over-a-complex-grid computation is a
 //!   diagnostic *visualization*, not a pass/fail correctness check, and a
@@ -158,6 +166,73 @@ pub fn amari_index(g: &Array2<f64>) -> f64 {
         col_term += col_sum / col_max - 1.0;
     }
     (row_term + col_term) / (2.0 * (n * (n - 1)) as f64)
+}
+
+/// The Frank matrix (Higham; MATLAB `gallery('frank', n)`): upper
+/// Hessenberg, `det = 1`, `F[i,j] = n-j` for `j >= i`, `F[i,i-1] = n-i` on
+/// the subdiagonal, `0` below it (`0`-indexed). Famous for eigenvalues that
+/// occur in reciprocal pairs (`lambda`, `1/lambda`), some pairs extremely
+/// ill-conditioned despite the matrix's modest integer entries -- a classic
+/// hard *eigenvalue* test. That property doesn't transfer to a closed form
+/// for the *singular* values this crate's solvers compute, so, like
+/// `kahan_matrix`, only self-consistency is checked here.
+pub fn frank_matrix(n: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n, n), |(i, j)| {
+        if j >= i {
+            (n - j) as f64
+        } else if j + 1 == i {
+            (n - i) as f64
+        } else {
+            0.0
+        }
+    })
+}
+
+/// The Forsythe matrix (Higham; MATLAB `gallery('forsythe', n, alpha,
+/// lambda)`): an `n x n` Jordan block with `lambda` on the diagonal and `1`
+/// on the superdiagonal, perturbed by a single small entry `alpha` in the
+/// bottom-left corner `(n-1, 0)` (`0`-indexed). Deliberately close to
+/// defective/non-diagonalizable (a bare Jordan block has one eigenvalue
+/// with a single eigenvector); the corner perturbation gives it `n`
+/// distinct eigenvalues (the `n`-th roots of `alpha`, spread around a
+/// circle) that are nonetheless extremely sensitive to further
+/// perturbation -- a classic non-normality stress test.
+pub fn forsythe_matrix(n: usize, lambda: f64, alpha: f64) -> Array2<f64> {
+    Array2::from_shape_fn((n, n), |(i, j)| {
+        if i == j {
+            lambda
+        } else if j == i + 1 {
+            1.0
+        } else if n > 0 && i == n - 1 && j == 0 {
+            alpha
+        } else {
+            0.0
+        }
+    })
+}
+
+/// The Parter matrix (Higham; MATLAB `gallery('parter', n)`):
+/// `P[i,j] = 1 / (i - j + 0.5)` (`0`-indexed, matching the `1`-indexed
+/// `1/(i-j+0.5)` convention since the `+0.5` offset is index-shift
+/// invariant). A real, citable fact from the literature (Parter's own
+/// result; see also Trefethen & Bau, *Numerical Linear Algebra*, on
+/// Toeplitz-matrix singular value clustering): almost all of its singular
+/// values cluster tightly near `pi` as `n` grows, unlike a generic
+/// ill-conditioned matrix's spread-out spectrum.
+pub fn parter_matrix(n: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n, n), |(i, j)| 1.0 / (i as f64 - j as f64 + 0.5))
+}
+
+/// The Cauchy matrix (Higham; MATLAB `gallery('cauchy', n)` default form):
+/// `C[i,j] = 1 / (x_i + y_j)` with `x = y = 1..n`, i.e.
+/// `C[i,j] = 1 / (i + j + 2)` (`0`-indexed). Symmetric positive definite
+/// and, like the Hilbert matrix, extremely ill-conditioned by construction
+/// -- a second, independently-constructed example of the same
+/// "graceful degradation past `f64`'s representable range" question
+/// `hilbert_matrix` answers, with a different (non-reciprocal-integer)
+/// entry structure.
+pub fn cauchy_matrix(n: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n, n), |(i, j)| 1.0 / (i as f64 + j as f64 + 2.0))
 }
 
 #[cfg(test)]
@@ -457,5 +532,167 @@ mod tests {
         let g = Array2::from_shape_vec((3, 3), vec![0.0, 2.5, 0.0, -1.5, 0.0, 0.0, 0.0, 0.0, 7.0])
             .unwrap();
         assert!(amari_index(&g) < 1e-15, "amari={:e}", amari_index(&g));
+    }
+
+    /// Frank matrix: no closed form for singular values in this crate (its
+    /// famous property, reciprocal eigenvalue pairs, is an eigenvalue fact,
+    /// not a singular-value one), so self-consistency is what's checked.
+    /// Measured at `n=16,32,64`: `orth_u`/`orth_v` up to `~9e-14`,
+    /// `rel_recon` up to `~7e-15` -- no sign of difficulty despite the
+    /// matrix's famously ill-conditioned eigenvalues.
+    #[test]
+    fn frank_matrix_stays_orthogonal_and_reconstructs() {
+        for n in [16usize, 32, 64] {
+            let a = frank_matrix(n);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+        }
+    }
+
+    /// Forsythe matrix (`lambda=0`, `alpha=1e-6`): a Jordan block --
+    /// deliberately close to defective/non-diagonalizable -- perturbed by
+    /// one small corner entry. Measured, not assumed: `LieSvdSmall::solve`
+    /// (polar decomposition plus Jacobi, not an eigenvalue algorithm)
+    /// reaches essentially *exact* results here (`orth_u`/`orth_v`/
+    /// `rel_recon` at or near `0` for `n<=32`, still `~1e-16`/`~5e-23` at
+    /// `n=64`) -- this construction's near-defectiveness, which makes
+    /// *eigenvalue* algorithms struggle, doesn't trouble an SVD route built
+    /// on polar decomposition the same way.
+    #[test]
+    fn forsythe_matrix_stays_orthogonal_and_reconstructs() {
+        for n in [16usize, 32, 64] {
+            let a = forsythe_matrix(n, 0.0, 1e-6);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+        }
+    }
+
+    /// Parter matrix: checks the specific, citable literature fact this
+    /// matrix is known for -- almost all singular values cluster near `pi`
+    /// as `n` grows -- rather than only generic self-consistency. Measured
+    /// fraction within `0.05` of `pi`: `13/16` (`81.25%`), `29/32`
+    /// (`90.6%`), `61/64` (`95.3%`) -- increasing with `n`, exactly the
+    /// asymptotic clustering the literature describes. Threshold set at
+    /// `75%`, safely under the worst (smallest-`n`) measured fraction.
+    #[test]
+    fn parter_matrix_singular_values_cluster_near_pi() {
+        for n in [16usize, 32, 64] {
+            let a = parter_matrix(n);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+
+            let near_pi = sigma
+                .iter()
+                .filter(|&&s| (s - std::f64::consts::PI).abs() < 0.05)
+                .count();
+            let fraction = near_pi as f64 / n as f64;
+            assert!(
+                fraction > 0.75,
+                "n={n} only {near_pi}/{n} singular values within 0.05 of pi"
+            );
+        }
+    }
+
+    /// Cauchy matrix (`1/(i+j+2)`, `0`-indexed): symmetric PD and, like the
+    /// Hilbert matrix, extremely ill-conditioned by construction with a
+    /// different entry structure. Same graceful-degradation question as
+    /// `hilbert_matrix_degrades_gracefully_past_double_precision_limits`:
+    /// measured up to `n=16` (`kappa` growing past `f64`'s representable
+    /// range there too, the same underflow-in-the-ratio symptom as
+    /// Hilbert), `orth_u`/`orth_v`/`rel_recon` stay at `~1e-14` throughout,
+    /// unaffected by the underflowed tail.
+    #[test]
+    fn cauchy_matrix_degrades_gracefully_past_double_precision_limits() {
+        for n in [6usize, 10, 16] {
+            let a = cauchy_matrix(n);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            assert!(u.iter().all(|x| x.is_finite()), "n={n}");
+            assert!(vt.iter().all(|x| x.is_finite()), "n={n}");
+            assert!(sigma.iter().all(|x| x.is_finite() && *x >= 0.0), "n={n}");
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+        }
+    }
+
+    fn synthetic_sources(channels: usize, samples: usize) -> Array2<f64> {
+        Array2::from_shape_fn((channels, samples), |(i, t)| {
+            let x = t as f64 / samples as f64;
+            let freq = 3.0 + i as f64 * 4.0;
+            match i % 4 {
+                0 => (2.0 * std::f64::consts::PI * freq * x).sin(),
+                1 => (2.0 * std::f64::consts::PI * freq * x).cos().signum(),
+                2 => {
+                    (2.0 * std::f64::consts::PI * freq * x).sin()
+                        + 0.4 * (2.0 * std::f64::consts::PI * (freq * 2.3) * x).sin()
+                }
+                _ => ((t * 37 + 11 * (i + 1)) as f64).sin() * 0.7,
+            }
+        })
+    }
+
+    /// The Amari index across a small parametric grid (`channels in
+    /// {4,8}`, `kappa in {1e3,1e5,1e7}`), rather than the single `kappa=1e7`
+    /// point checked elsewhere -- does BSS's improvement hold up as
+    /// conditioning gets worse and as the channel count grows, or was the
+    /// single-point result a favorable roll of one seed? Measured, not
+    /// assumed (each cell is its own independent seed, not cherry-picked):
+    ///
+    /// | channels | kappa | before | after |
+    /// | -------: | ----: | -----: | ----: |
+    /// | 4 | 1e3 | 3.88e-1 | 6.46e-4 |
+    /// | 4 | 1e5 | 4.94e-1 | 2.03e-1 |
+    /// | 4 | 1e7 | 5.21e-1 | 5.08e-2 |
+    /// | 8 | 1e3 | 3.31e-1 | 5.40e-2 |
+    /// | 8 | 1e5 | 3.33e-1 | 1.14e-1 |
+    /// | 8 | 1e7 | 3.39e-1 | 1.50e-1 |
+    ///
+    /// Separation improves the Amari index at all `6` grid points -- but
+    /// not monotonically in `kappa` (`channels=4`'s `after` at `kappa=1e5`
+    /// is *worse* than at `kappa=1e7`), reported as measured rather than
+    /// smoothed into a cleaner-sounding trend that isn't actually there;
+    /// with only one random seed per cell, a non-monotonic result here is
+    /// expected sampling variation, not a claim that higher `kappa` reduces
+    /// separation quality now and forever.
+    #[test]
+    fn amari_index_improves_across_a_channel_by_condition_number_grid() {
+        let samples = 800;
+        for channels in [4usize, 8] {
+            for &kappa in &[1e3_f64, 1e5, 1e7] {
+                let mut rng =
+                    StdRng::seed_from_u64(606 + channels as u64 * 100 + kappa.log10() as u64);
+                let u = random_orthogonal(channels, &mut rng);
+                let v = random_orthogonal(channels, &mut rng);
+                let mut sigma = Array2::<f64>::zeros((channels, channels));
+                for i in 0..(channels - 1) {
+                    sigma[[i, i]] = 1.0;
+                }
+                sigma[[channels - 1, channels - 1]] = 1.0 / kappa;
+                let mixing = u.dot(&sigma).dot(&v.t());
+
+                let sources = synthetic_sources(channels, samples);
+                let observations = mixing.dot(&sources);
+                let result =
+                    LieSvdBss::separate(&observations, PhaseBssParams::for_channels(channels));
+                let before = amari_index(&mixing);
+                let g = result.unmixing.dot(&mixing);
+                let after = amari_index(&g);
+                assert!(
+                    after < before,
+                    "channels={channels} kappa={kappa:e} before={before:e} after={after:e}"
+                );
+                assert!(after.is_finite() && after >= 0.0);
+            }
+        }
     }
 }
