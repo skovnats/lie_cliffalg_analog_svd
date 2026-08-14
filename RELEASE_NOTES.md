@@ -1,5 +1,92 @@
 # Release Notes
 
+## 0.34.0
+
+Validation against standard, world-recognized "evil matrix" and BSS
+benchmarks (`lie_svd_benchmarks`), prompted directly by the question "we're
+not the only ones working on SVD/joint-diagonalization/BSS — surely there
+are standard benchmarks for bad matrices and signals?" Answered concretely
+rather than in the abstract: this crate has no LAPACK/BLAS/faer dependency
+(a deliberate design choice, stated in `bin/stress_cpu.rs`'s own doc
+comment), so "compare against a reference SVD" cannot literally mean
+"compare against LAPACK's `dgesvd`" without contradicting that. What's
+implemented instead, in order of how strong a check it gives: exact
+closed-form ground truth, imposed ground truth, and — only where neither
+is available or even mathematically meaningful — self-consistency.
+
+- **Pei matrix** (`pei_matrix`, `pei_matrix_singular_values`): `P = alpha*I
+  + J`, symmetric PD, with *exact* closed-form eigenvalues (`alpha+n` once,
+  `alpha` with multiplicity `n-1` — real external ground truth, not
+  computed by any solver here) and, with a small `alpha`, a genuine
+  degenerate-spectrum stress test at the same time. Measured: `n=16` and
+  `n=64` at `alpha=0.01` both recover the exact spectrum to
+  `sigma_max_rel ~8.8e-14` and `~7.8e-13` respectively — essentially
+  machine precision on an `(n-1)`-fold repeated singular value, direct
+  evidence the Jacobi rotor doesn't stall or wander within the degenerate
+  eigenspace.
+- **Kahan matrix** (`kahan_matrix`, the standard `gallery('kahan', n,
+  theta)` construction): no external ground truth exists for its singular
+  values in this crate, so self-consistency is what's checked and what's
+  honestly claimable — measured `orth_u/orth_v ~3-8e-14`,
+  `rel_recon ~4-26e-15` at `n=32,64`, with the intended wide singular-value
+  spread preserved (`sigma_max/sigma_min` up to `~9.4e10` at `n=64`, not
+  smoothed away by the solve).
+- **Hilbert matrix** (`hilbert_matrix`): condition number grows past
+  `f64`'s representable dynamic range (`~1e16`) beyond `n~13`, so no
+  solver — this one or any other — can recover its smallest singular
+  values there; claiming otherwise would be false regardless of which
+  solver computed them. Measured rather than assumed: even at `n=14,16`,
+  where the true smallest singular value underflows to numerical noise,
+  `orth_u`/`orth_v`/`rel_recon` stay at `~1e-14`, essentially unchanged
+  from the well-conditioned `n<=12` range — the solver doesn't corrupt
+  anything else on the way to the representable floor, it just (correctly)
+  can't report accuracy on values below it.
+- **`profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum`
+  actually asserted against, for the first time.** Both profiles already
+  carried an exact `sigma_ref` (imposed by construction) and `stress_cpu`
+  already *displayed* the resulting relative error — but nothing in
+  `cargo test` ever asserted on it. That's a real, narrow test-coverage
+  gap, closed rather than reimplemented: the LAPACK-style "controlled
+  spectrum" benchmark the original question asked for already existed, it
+  just wasn't wired into a pass/fail check. `DegenerateSpectrum`
+  (`kappa~1e14`) recovers its well-conditioned top cluster to `~1e-16`
+  relative error and its near-noise-floor tail (`1e-12`, `~45x` above this
+  matrix's own rounding floor) to a genuine, measured few percent — a real
+  bound, not loosened arbitrarily. `ExtremeIllConditioned` (`kappa=1e18`,
+  deliberately beyond representable range) needed its own first test
+  version corrected after measurement: an index-based "top 3/4 must be
+  accurate" cutoff assumed a clean break that doesn't exist — the *absolute*
+  error is what's actually bounded (`~1e-14` down to `~1e-17`, essentially
+  constant across the whole spectrum, consistent with rounding noise on a
+  `sigma_max=1` matrix), while relative error necessarily explodes once a
+  singular value shrinks below that fixed floor. Rewritten to check
+  absolute error across the full spectrum (`<1e-9`) plus tight relative
+  error only where relative error remains a meaningful notion.
+- **Amari performance index** (`amari_index` — Amari, Cichocki & Yang,
+  NeurIPS 1996): the standard permutation/scale-invariant BSS quality
+  metric, complementing (not replacing) the existing ad-hoc `estimate_sir_db`.
+  Applied to `LieSvdBss` on a synthetic mixing matrix with condition
+  number `1e7` (`>1e6`, matching the "near-collinear sensor channels" case
+  from the original question): separation measurably improves the Amari
+  index (`~0.295 -> ~0.192`) — a real, non-trivial improvement on a
+  genuinely hard case, reported honestly as moderate rather than
+  overstated as near-perfect, since a covariance/lagged-statistics method
+  has real limits at this condition number.
+
+**Explicitly scoped out, not silently dropped:** SuiteSparse/Matrix Market
+and Cardoso's own JADE/SOBI EEG/MEG datasets (both would need network
+access, breaking this project's established offline-reproducible
+`docker build --no-cache` pattern); Frank/Forsythe/Parter/Cauchy matrices
+(left for a future pass — the three matrices implemented already cover
+three qualitatively distinct hard cases: near-rank-deficient triangular,
+extreme-condition symmetric, exact-degenerate symmetric); Trefethen
+pseudospectra (a real diagnostic tool for non-normal matrices, but a
+resolvent-norm-over-a-complex-grid computation is a visualization, not a
+pass/fail check, and a substantially larger undertaking than this pass).
+
+136/136 tests pass (129 carried over plus 7 new), `cargo fmt --check` and
+`cargo clippy` clean on the new module.
+
 ## 0.33.0
 
 A stabilization cycle on `lie_svd_subspace_jade`, closing two follow-ups

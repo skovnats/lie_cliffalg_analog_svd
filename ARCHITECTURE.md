@@ -1764,6 +1764,129 @@ The BSS metric layer includes:
 - `estimate_sir_db`: a synthetic benchmark helper that matches separated
   channels to reference sources by absolute correlation.
 
+### `src/lie_svd_benchmarks.rs`
+
+`0.34.0`: standard, world-recognized "evil matrix" and BSS benchmarks,
+applied to this crate's own solvers rather than left as a synthetic-only
+test suite. Prompted directly by the question of whether standard
+benchmarks for bad matrices/signals exist in the wider field (they do) and
+whether this crate holds up against them (checked here, honestly, rather
+than assumed).
+
+**Why not just compare against LAPACK.** This crate deliberately has no
+LAPACK/BLAS/faer dependency (see `bin/stress_cpu.rs`'s own doc comment and
+`Cargo.toml`), so "compare against a reference SVD" cannot literally mean
+"compare against `dgesvd`" without contradicting that design choice. The
+module's own doc comment lays out what's used instead, ranked by how
+strong a check it gives:
+
+1. **Exact closed-form ground truth** (`pei_matrix`): `P = alpha*I + J`
+   (`J` the all-ones matrix). `J`'s eigenvalues are `n` once (eigenvector
+   the all-ones vector) and `0` with multiplicity `n-1` (its orthogonal
+   complement), so `P`'s eigenvalues are exactly `alpha+n` once and `alpha`
+   with multiplicity `n-1` -- independently derivable, not computed by any
+   solver here, the strongest available check. A small `alpha` makes this
+   simultaneously a genuine degenerate-spectrum stress test: an `(n-1)`-fold
+   repeated singular value is exactly where a Jacobi sweep could stall, or
+   a rotor might wander freely within the degenerate eigenspace without
+   individual singular values coming out wrong. Measured
+   (`pei_matrix_matches_exact_closed_form_singular_values`, `n=16,64`,
+   `alpha=0.01`): `sigma_max_rel ~8.8e-14` and `~7.8e-13` respectively --
+   essentially machine precision on the repeated eigenvalue, direct
+   evidence against stalling.
+2. **Imposed ground truth**
+   (`crate::profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum`,
+   built from a random orthogonal `U,V` times a chosen diagonal spectrum,
+   already present in this crate with an exact `sigma_ref` before this
+   module existed). `stress_cpu` already computed and *displayed* the
+   resulting relative error, but nothing in `cargo test` ever asserted on
+   it -- a real, narrow test-coverage gap, closed here
+   (`degenerate_spectrum_profile_recovers_its_imposed_sigma_ref`,
+   `extreme_ill_conditioned_profile_stays_within_absolute_error_across_full_spectrum`)
+   rather than reimplementing the LAPACK-style "controlled spectrum"
+   generator that already existed.
+3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`): no external
+   ground truth is available, or -- for `hilbert_matrix` past the size
+   where its condition number exceeds `f64`'s representable range -- no
+   ground truth is even representable in double precision. Orthogonality
+   of the recovered bases and reconstruction accuracy are what's actually
+   checkable; claiming machine-precision recovery of singular values
+   smaller than the matrix's own rounding error would be false regardless
+   of which solver computed them.
+
+**A test that was corrected after measuring, not before.** The first
+version of the `ExtremeIllConditioned` check (`kappa=1e18`, deliberately
+beyond `f64`'s `~1e16` representable range) asserted that the top `3/4` of
+the sorted spectrum -- the same quartile split `metrics::compute` itself
+uses for `sigma_tail_rel` -- would be accurate to a tight relative
+tolerance, assuming a clean break between "recoverable" and
+"unrecoverable" singular values. Measured directly: no such break exists.
+Relative error grows *smoothly* as singular values shrink, because what's
+actually bounded is the **absolute** error -- `~1e-14` down to `~1e-17`,
+essentially constant across the entire spectrum at every index checked,
+consistent with `f64` rounding noise on a `sigma_max=1` matrix -- and
+relative error is just that near-constant absolute error divided by an
+ever-shrinking denominator, so it necessarily explodes once a singular
+value drops below the noise floor, regardless of where in the sorted list
+that happens to fall. The test was rewritten
+(`extreme_ill_conditioned_profile_stays_within_absolute_error_across_full_spectrum`)
+to check absolute error (`< 1e-9`, ample margin over the measured `~1e-14`
+scale) across the *entire* spectrum -- the honest thing to claim -- plus
+tight relative error only for entries where `want > 1e-6`, i.e. still well
+above the noise floor, where "relative error" remains a meaningful notion
+at all.
+
+**Hilbert matrix: measuring where "no ground truth" becomes "no ground
+truth exists".** `hilbert_matrix`'s condition number grows roughly like
+`e^{3.5n}` (the classical asymptotic result for this matrix) and exceeds
+`f64`'s representable dynamic range beyond `n~13`; no solver can recover
+its smallest singular values there, a fact about the problem, not this
+crate's implementation. What was actually measured, not assumed: does the
+solver degrade gracefully elsewhere once that happens? At `n=14,16`, where
+the true smallest singular value underflows toward numerical noise (the
+computed `sigma_max/sigma_min` ratio itself becomes an ill-defined,
+near-`f64::MAX` number at these sizes -- a symptom of the underflow, not a
+new failure mode), `orth_u`/`orth_v`/`rel_recon` all stay at `~1e-14`,
+statistically indistinguishable from the well-conditioned `n<=12` range
+(also measured at `~1e-14` to `~1e-15`). The reconstruction stays accurate
+because it's dominated by the well-represented large singular values, not
+the underflowed small ones.
+
+**Amari performance index** (`amari_index`; Amari, Cichocki & Yang, *A New
+Learning Algorithm for Blind Signal Separation*, NeurIPS 1996): the
+standard permutation/scale-invariant metric for scoring a BSS/ICA global
+system matrix `g = unmixing @ mixing`. Complements, rather than replaces,
+`lie_svd_bss`'s existing `estimate_sir_db` -- a raw `||g - I||`-style error
+would be meaningless here, since recovered sources are only ever
+identified up to which-source-is-which and their sign/scale, exactly the
+ambiguity this index is invariant to (`0` exactly for a scaled permutation
+matrix, tested directly in `amari_index_is_zero_for_a_scaled_permutation`).
+Applied (`amari_index_is_small_after_bss_on_ill_conditioned_mixing`) to a
+synthetic mixing matrix built the same controlled-spectrum way as the
+profiles above (`sigma = [1,1,1,1e-7]`, condition number `1e7`, matching
+the "near-collinear sensor channels, `kappa > 1e6`" case from the
+originating question) and separated with the existing `LieSvdBss`: the
+Amari index measurably improves (`~0.295 -> ~0.192`) -- a real,
+non-trivial improvement, reported as the moderate result it actually is,
+not inflated into a claim of near-perfect separation at a condition number
+this challenging for a covariance/lagged-statistics method.
+
+**Explicitly scoped out, stated rather than silently dropped:**
+SuiteSparse/Matrix Market and Cardoso's own JADE/SOBI EEG/MEG benchmark
+datasets (both would require network downloads, breaking this project's
+established offline-reproducible `docker build --no-cache` pattern);
+Frank/Forsythe/Parter/Cauchy matrices (legitimate members of the Higham
+test suite, left for a future pass -- the three matrices implemented
+already cover three qualitatively different hard cases: near-rank-deficient
+triangular, extreme-condition-number symmetric, exact-degenerate
+symmetric; Frank's own distinguishing property, reciprocal eigenvalue
+pairs, is a nonsymmetric *eigenvalue* fact rather than a singular-value
+one, so it wouldn't add a new SVD-relevant failure mode this set doesn't
+already exercise); Trefethen pseudospectra (a genuinely relevant
+diagnostic for non-normal matrices, but a resolvent-norm-over-a-complex-grid
+computation is a visualization tool, not a pass/fail correctness check,
+and a substantially larger undertaking than this pass's scope).
+
 ### `src/lie_svd_tensor.rs`
 
 Higher-order phase SVD / Tucker-style tensor prototype.

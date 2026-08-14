@@ -1,17 +1,58 @@
 # lie_cliffalg_analog_svd
+## TL;DR
 
-Research-grade SVD solvers and phase-rotor diagnostics for dense `f64`
-matrices, packaged as a small Linux/CPU crate.
+Rust research prototype for dense numerical linear algebra, organized around one
+idea: rows and columns are two families of generators, and a decomposition is a
+schedule of rotations that locks their relative phases.
 
-The project keeps the useful part of the Lie/Clifford/analog-chip exploration:
-ordinary CPU arrays in memory, but rotor-based update rules that mirror future
-analog or photonic hardware where orthogonal rotations are native operations.
+Storage stays ordinary — `f64` arrays in CPU memory, `Complex64` on the complex
+branch. The geometry lives in the update rules, not in the memory layout, which
+is what makes the same rotor stream exportable to analog or photonic meshes
+where orthogonal rotations are native operations.
 
-The main practical focus is **difficult SVD inputs**: degenerate spectra,
-extreme ill-conditioning, non-normal/Jordan-like structure, and cases where a
-small reconstruction error can hide a broken singular-vector basis. The package
-therefore reports orthogonality and spectrum-tail diagnostics, not only
-`||A - U Sigma Vt||`.
+## What's in it
+
+- **SVD** for square and rectangular dense matrices: an exact polar/Jacobi
+  baseline, closed-form kernels for `n <= 4`, an active phase-locking route with
+  golden-angle anti-resonance, and a conservative dispatcher that only enables
+  the geometric routes when a cheap `O(n^2)` triage supports them.
+- **Joint diagonalization** of matrix families — same-size (Phase-JADE),
+  two-sided, and across *heterogeneous* axis sets, where matrices share only
+  some of their generators.
+- **Adjacent problems on the same machinery**: blind source separation,
+  three-mode HO-SVD, and tabular fits (Gram, dual/kernel, anisotropic ridge,
+  Procrustes transfer).
+- **Hardware export**: any accepted rotor stream, or any orthogonal matrix,
+  compiles to a layer/channel/angle schedule for a Mach–Zehnder mesh.
+
+## What it's for
+
+Difficult inputs. Degenerate spectra, extreme ill-conditioning, non-normal and
+Jordan-like structure, and cases where a small reconstruction error hides a
+broken singular-vector basis — which is why the package reports orthogonality
+and spectrum-tail diagnostics, not only `||A - U Sigma Vt||`.
+
+## What it is not
+
+Not a LAPACK replacement, and not universally faster than classical dense
+solvers. Results here are reproducible smoke checks on synthetic profiles, not
+wall-clock benchmarks against production solvers.
+
+## Reporting practice
+
+Claims in this repository are tests. Routes that failed are reported with the
+numbers, and where the cause was later found the fix is recorded alongside the
+original failure rather than replacing it — comparison tests are written to
+assert the comparison, not a threshold, so a reversal announces itself.
+
+Two preprints describe the method and its measured limits: Part I (operators)
+and Part II (tables and heterogeneous coupling). DOIs below.
+
+<p align="center">
+  <img src="avatar.png" alt="Clifford phase-rotor geometry for numerical linear algebra" width="100%">
+</p>
+
+---
 
 ## What We Built
 
@@ -226,6 +267,34 @@ that were gradually made more conservative and testable:
   genuine best-effort plateau) and confirms `0.32.0`'s
   `axis_connected_components` was already public and tested — clarified
   rather than needlessly redone. See the 0.33.0 section below.
+- **Standard "evil matrix" and BSS benchmarks (`lie_svd_benchmarks`):**
+  `0.34.0` validates against world-recognized hard cases rather than only
+  this crate's own synthetic profiles, prompted by the direct question of
+  whether standard benchmarks exist for bad matrices and BSS. This crate
+  has no LAPACK/BLAS/faer dependency by design, so ground truth comes from
+  exact closed forms and imposed spectra instead of a reference solver: the
+  Pei matrix (`P = alpha*I + J`) has *exact* eigenvalues and, at small
+  `alpha`, an `(n-1)`-fold degenerate one — recovered to `~1e-13` relative
+  error, direct evidence the Jacobi rotor doesn't stall on repeated
+  singular values. The Kahan and Hilbert matrices have no such closed form
+  (self-consistency is what's checked); Hilbert specifically, past `n~13`
+  where its condition number exceeds `f64`'s representable range, is
+  checked for graceful degradation rather than impossible precision —
+  measured, `U`/`V` orthogonality and reconstruction stay at `~1e-14` even
+  at `n=16`, unaffected by the underflowed tail. Two of this crate's own
+  existing profiles (`ExtremeIllConditioned`, `DegenerateSpectrum`) already
+  carried exact imposed ground truth but were never actually asserted
+  against in `cargo test` before this — a real, narrow coverage gap, closed
+  rather than reimplemented. And the standard Amari performance index
+  (permutation/scale-invariant BSS metric) is applied to `LieSvdBss` on a
+  `kappa=1e7` near-collinear mixing case, measuring a real, honestly-
+  reported *moderate* improvement (`~0.295 -> ~0.192`), not an inflated
+  claim of near-perfect separation. SuiteSparse and Cardoso's own EEG/MEG
+  datasets were explicitly scoped out (both need network access, breaking
+  this project's offline-reproducible Docker pattern); Frank/Forsythe/
+  Parter/Cauchy matrices and Trefethen pseudospectra were considered and
+  left for a future pass rather than silently dropped. See the 0.34.0
+  section below.
 
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
@@ -311,6 +380,22 @@ keeps the simpler fast path.
   shared Phase-JADE rotor field, and returns an unmixing matrix plus separated
   channels. It also reports `Channel Phase Coherence` and a simple SIR estimate
   helper for synthetic benchmarks.
+- `lie_svd_benchmarks`: `0.34.0`, world-recognized "evil matrix" and BSS
+  benchmarks applied to this crate's own solvers. `kahan_matrix`,
+  `hilbert_matrix`, and `pei_matrix` (the last with *exact* closed-form
+  eigenvalues, `alpha+n` once and `alpha` with multiplicity `n-1` — real
+  external ground truth, and a genuine degenerate-spectrum stress test at
+  small `alpha`); `amari_index`, the standard permutation/scale-invariant
+  BSS quality metric (Amari, Cichocki & Yang 1996), applied to `LieSvdBss`
+  on a `kappa=1e7` near-collinear mixing case. Also wires this crate's own
+  `profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum` (which
+  already carried exact imposed `sigma_ref`) into real `cargo test`
+  assertions for the first time, rather than only `stress_cpu`'s CLI
+  display. No LAPACK/BLAS/faer reference SVD is used, by this crate's own
+  design — see the module's own doc comment for exactly what ground truth
+  each benchmark uses instead, and what was explicitly scoped out
+  (SuiteSparse, Cardoso's EEG/MEG datasets, Trefethen pseudospectra) rather
+  than silently skipped.
 - `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes
   `lie_svd_joint` to a family of matrices (`SubspaceMatrix`, each with its
   own size and a `Vec<usize>` mapping local rows/columns to global generator
@@ -1509,6 +1594,106 @@ direct end-to-end test compiling a subspace-JADE local rotor straight
 through `0.31.0`'s `HardwareSchedule::from_orthogonal_matrix`, confirming
 the two pieces of generator-coupled work from the last two releases connect
 with no glue code needed.
+
+`0.34.0` answers a direct question: this crate isn't the only one working
+on SVD, joint diagonalization, and BSS — do standard, world-recognized
+benchmarks for bad matrices and hard signals exist, and does this crate
+hold up against them? Yes, and the honest first step was working out what
+"compare against a reference" can actually mean here: this crate
+deliberately has no LAPACK/BLAS/faer dependency (stated in
+`bin/stress_cpu.rs`'s own doc comment), so "compare against LAPACK's
+`dgesvd`" was never on the table without contradicting that design choice.
+What `lie_svd_benchmarks` uses instead, ranked by how strong a check it
+actually gives: exact closed-form ground truth where a named test matrix
+has one; ground truth imposed by construction where it doesn't; and, only
+where neither is available or even mathematically meaningful, plain
+self-consistency (orthogonality and reconstruction accuracy).
+
+The Pei matrix (`P = alpha*I + J`, `J` the all-ones matrix) is the
+strongest case: `J` has eigenvalue `n` once and `0` with multiplicity
+`n-1`, so `P`'s eigenvalues are exactly `alpha+n` once and `alpha` with
+multiplicity `n-1` — a real, independently-derived answer, not computed by
+any solver in this crate, and, with a small `alpha`, simultaneously a hard
+degenerate-spectrum stress test (an `(n-1)`-fold repeated singular value is
+exactly the case where a Jacobi sweep could stall, or where a rotor might
+wander within the degenerate eigenspace without ever getting individual
+singular values wrong). Measured at `n=16` and `n=64`, `alpha=0.01`: exact
+spectrum recovered to `sigma_max_rel ~8.8e-14` and `~7.8e-13` respectively
+— essentially machine precision on the repeated eigenvalue.
+
+The Kahan matrix (the standard `gallery('kahan', n, theta)` construction,
+built to defeat column-pivoted QR's rank detection) has no such closed
+form for its own singular values in this crate, so self-consistency is
+what's actually checkable and what's honestly claimed: measured
+`orth_u`/`orth_v ~3-8e-14`, `rel_recon ~4-26e-15` at `n=32,64`, with the
+matrix's intended wide singular-value spread preserved through the solve
+(`sigma_max/sigma_min` up to `~9.4e10` at `n=64`) rather than smoothed
+away.
+
+The Hilbert matrix is where "no ground truth" turns into "no ground truth
+*exists*, past a point": its condition number grows roughly like `e^{3.5n}`
+and exceeds `f64`'s representable dynamic range (`~1e16`) beyond `n~13`,
+so no solver — this one or any other — can recover its smallest singular
+values there; claiming otherwise would be false regardless of implementation.
+What's actually testable, and what was measured rather than assumed: does
+the solver degrade *gracefully*, i.e. does it stay well-behaved everywhere
+else once individual singular values become unrepresentable? Yes — at
+`n=14` and `n=16`, where the true smallest singular value underflows to
+numerical noise, `orth_u`/`orth_v`/`rel_recon` all stay at `~1e-14`,
+essentially unchanged from the well-conditioned `n<=12` range. The first
+version of this crate's own `ExtremeIllConditioned` profile check (see
+below) initially assumed a cleaner story than that turned out to be true,
+and was corrected after measuring, not before.
+
+This crate already had a LAPACK-style "controlled spectrum" benchmark —
+`profiles::Profile::ExtremeIllConditioned` and `DegenerateSpectrum`, each
+built from a random orthogonal `U,V` times a chosen diagonal, carrying an
+exact `sigma_ref` — and `stress_cpu` already *displayed* the resulting
+relative error. What it never did was get asserted against in `cargo
+test`: a real, narrow coverage gap, closed here rather than reimplemented
+from scratch. `DegenerateSpectrum` (`kappa~1e14`, `100` down to `1e-12`)
+recovers its well-conditioned top cluster to `~1e-16` relative error and
+its near-noise-floor tail to a genuine, measured few percent (the smallest
+imposed value sits only `~45x` above this matrix's own per-entry rounding
+floor, so a few percent there reflects proximity to that floor, not a
+solver defect). `ExtremeIllConditioned` (`kappa=1e18`, deliberately beyond
+representable range) needed its test rewritten once real numbers came in:
+an index-based "top 3/4 of the spectrum must be relatively accurate"
+cutoff — the first version — assumed a clean quartile break that measurement
+showed doesn't exist; relative error grows *smoothly*, not with a sharp
+edge, because what's actually bounded is the *absolute* error (`~1e-14`
+down to `~1e-17`, essentially constant across the whole spectrum, matching
+`f64` rounding noise on a `sigma_max=1` matrix) — relative error simply
+explodes once a singular value shrinks below that fixed absolute floor.
+Rewritten to check absolute error across the full spectrum, plus tight
+relative error only where relative error remains a meaningful notion (the
+entries still well above the floor).
+
+Finally, the Amari performance index (Amari, Cichocki & Yang, *A New
+Learning Algorithm for Blind Signal Separation*, NeurIPS 1996) — the
+standard permutation/scale-invariant BSS quality metric, complementing
+rather than replacing this crate's existing ad-hoc `estimate_sir_db`, since
+a raw matrix-difference norm is meaningless for BSS (recovered sources are
+only ever identified up to which-source-is-which and their sign/scale).
+Applied to `LieSvdBss` on a synthetic mixing matrix with condition number
+`1e7` (matching the "near-collinear sensor channels, `kappa > 1e6`" case
+from the original question): separation measurably improves the Amari
+index, `~0.295 -> ~0.192` — a real, non-trivial improvement, reported as
+the moderate result it actually is rather than inflated into a claim of
+near-perfect separation, since a covariance/lagged-statistics method has
+genuine limits at this condition number.
+
+Explicitly scoped out, not silently dropped: SuiteSparse/Matrix Market and
+Cardoso's own JADE/SOBI EEG/MEG datasets (both would need network access,
+breaking this project's established offline-reproducible
+`docker build --no-cache` pattern); Frank/Forsythe/Parter/Cauchy matrices
+(the three implemented already cover three qualitatively distinct hard
+cases — near-rank-deficient triangular, extreme-condition symmetric,
+exact-degenerate symmetric — left for a future pass rather than needed
+immediately); Trefethen pseudospectra (a genuinely useful diagnostic for
+non-normal matrices, but a resolvent-norm-over-a-complex-grid computation
+is a visualization, not a pass/fail correctness check, and a substantially
+larger undertaking than this pass's scope).
 
 `0.22.0` adds the unified phase engine, hardware schedule compiler, `--full-suite`
 CLI smoke, and a stricter complex Hermitian/QR polish path:
