@@ -398,12 +398,12 @@ fn joint_pair_energy_after(work: &[Array2<f64>], i: usize, j: usize, theta: f64)
     out
 }
 
-fn apply_symmetric_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
+pub(crate) fn apply_symmetric_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     apply_left_rotor(work, i, j, theta);
     apply_right_rotor(work, i, j, theta);
 }
 
-fn apply_left_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
+pub(crate) fn apply_left_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     let cols = work.ncols();
     let (s, c) = theta.sin_cos();
     for col in 0..cols {
@@ -414,7 +414,7 @@ fn apply_left_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     }
 }
 
-fn apply_right_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
+pub(crate) fn apply_right_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     let rows = work.nrows();
     let (s, c) = theta.sin_cos();
     for row in 0..rows {
@@ -425,7 +425,7 @@ fn apply_right_rotor(work: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     }
 }
 
-fn apply_basis_rotor(basis: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
+pub(crate) fn apply_basis_rotor(basis: &mut Array2<f64>, i: usize, j: usize, theta: f64) {
     let n = basis.nrows();
     let (s, c) = theta.sin_cos();
     for row in 0..n {
@@ -458,7 +458,7 @@ fn joint_local_offdiag_sq_for_axes(work: &[Array2<f64>], i: usize, j: usize) -> 
         .sum()
 }
 
-fn offdiag_sq(m: &Array2<f64>) -> f64 {
+pub(crate) fn offdiag_sq(m: &Array2<f64>) -> f64 {
     let rows = m.nrows();
     let cols = m.ncols();
     let mut s = 0.0_f64;
@@ -472,7 +472,7 @@ fn offdiag_sq(m: &Array2<f64>) -> f64 {
     s
 }
 
-fn local_offdiag_sq_for_axes(m: &Array2<f64>, i: usize, j: usize) -> f64 {
+pub(crate) fn local_offdiag_sq_for_axes(m: &Array2<f64>, i: usize, j: usize) -> f64 {
     let rows = m.nrows();
     let cols = m.ncols();
     let mut s = 0.0_f64;
@@ -503,7 +503,7 @@ fn diagonal_corridor(m: &Array2<f64>) -> Array1<f64> {
     Array1::from_shape_fn(n, |i| m[[i, i]].abs())
 }
 
-fn wrap_jacobi_angle(mut angle: f64) -> f64 {
+pub(crate) fn wrap_jacobi_angle(mut angle: f64) -> f64 {
     while angle > std::f64::consts::FRAC_PI_4 {
         angle -= std::f64::consts::FRAC_PI_2;
     }

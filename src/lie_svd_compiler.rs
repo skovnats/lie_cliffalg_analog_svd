@@ -7,6 +7,7 @@
 
 use crate::lie_svd_complex::{ComplexMziPhase, ComplexPhaseEventKind};
 use crate::lie_svd_phaseflow::{MziPhase, PhaseRotorKind};
+use ndarray::Array2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HardwareTarget {
@@ -45,6 +46,13 @@ pub struct HardwareSchedule {
     pub target: HardwareTarget,
     pub channels: usize,
     pub events: Vec<HardwarePhaseEvent>,
+    /// `+-1` diagonal left over after `from_orthogonal_matrix`'s Givens
+    /// sweep (see that method's doc comment) — empty for schedules built
+    /// from a PhaseFlow event log, which have no such leftover diagonal.
+    /// Needed to reconstruct the original matrix exactly from `events`
+    /// alone; a schedule missing it would silently lose information rather
+    /// than just being awkward to use.
+    pub diagonal_signs: Vec<f64>,
 }
 
 impl HardwareSchedule {
@@ -75,6 +83,7 @@ impl HardwareSchedule {
             target,
             channels,
             events,
+            diagonal_signs: Vec::new(),
         }
     }
 
@@ -105,6 +114,86 @@ impl HardwareSchedule {
             target,
             channels,
             events,
+            diagonal_signs: Vec::new(),
+        }
+    }
+
+    /// Compiles an arbitrary `d x d` orthogonal matrix (a rotor that was
+    /// never accompanied by its own rotation-angle trace — e.g.
+    /// `lie_tbl_regress::procrustes_rotor`'s output, or any other rotor
+    /// this crate hands back only as a plain matrix) into a Givens-rotation
+    /// event schedule, without needing the solver that produced it to log
+    /// anything.
+    ///
+    /// This was needed because `lie_svd_small::eigh_jacobi_full` (the
+    /// square eigensolver backing most of this crate's rotors) does not
+    /// record a rotation trace as it runs — instrumenting a hot, widely
+    /// shared solver path to do so was judged higher-risk than the
+    /// alternative used here: decompose the *already-orthogonal result*
+    /// after the fact via a standard Givens QR sweep. Since the input is
+    /// already orthogonal, eliminating its strict lower triangle with
+    /// Givens rotations leaves an orthogonal *and* upper-triangular
+    /// matrix, which is necessarily diagonal with `+-1` entries (an
+    /// upper-triangular orthogonal matrix cannot have any other off-diagonal
+    /// content: each column must have unit norm using only the entries at
+    /// or above its own row). So `V = G_1^T G_2^T ... G_m^T D` exactly,
+    /// `D = diag(+-1)`, `G_k` the recorded rotations in elimination order —
+    /// see `orthogonal_matrix_round_trips_through_givens_schedule` for the
+    /// reconstruction that verifies this to machine precision rather than
+    /// asserting it.
+    pub fn from_orthogonal_matrix(v: &Array2<f64>, target: HardwareTarget) -> Self {
+        let d = v.nrows();
+        assert_eq!(
+            v.ncols(),
+            d,
+            "HardwareSchedule::from_orthogonal_matrix: matrix must be square, got {}x{}",
+            d,
+            v.ncols()
+        );
+        let mut r = v.clone();
+        let mut events = Vec::new();
+        let mut layer = 0usize;
+        for j in 0..d {
+            for i in (j + 1)..d {
+                let a = r[[j, j]];
+                let b = r[[i, j]];
+                if b.abs() <= 1e-300 {
+                    continue;
+                }
+                let norm = (a * a + b * b).sqrt();
+                let c = a / norm;
+                let s = b / norm;
+                for k in 0..d {
+                    let rj = r[[j, k]];
+                    let ri = r[[i, k]];
+                    r[[j, k]] = c * rj + s * ri;
+                    r[[i, k]] = -s * rj + c * ri;
+                }
+                let theta = s.atan2(c);
+                events.push(HardwarePhaseEvent {
+                    layer,
+                    i,
+                    j,
+                    phi_l: 0.0,
+                    phi_r: 0.0,
+                    theta,
+                    theta_l: theta,
+                    theta_r: 0.0,
+                    energy_before: None,
+                    energy_after: None,
+                    source: "orthogonal_givens",
+                    kind: "givens_elimination",
+                });
+                layer += 1;
+            }
+        }
+        let diagonal_signs: Vec<f64> = (0..d).map(|k| r[[k, k]].signum()).collect();
+        Self {
+            format_version: "phase-schedule-v1",
+            target,
+            channels: d,
+            events,
+            diagonal_signs,
         }
     }
 
@@ -159,7 +248,18 @@ impl HardwareSchedule {
             }
             out.push('\n');
         }
-        out.push_str("  ]\n");
+        out.push_str("  ]");
+        if !self.diagonal_signs.is_empty() {
+            out.push_str(",\n  \"diagonal_signs\": [");
+            for (idx, sign) in self.diagonal_signs.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{sign}"));
+            }
+            out.push(']');
+        }
+        out.push('\n');
         out.push_str("}\n");
         out
     }
@@ -260,5 +360,88 @@ mod tests {
         let json = schedule.to_json_string();
         assert!(json.contains("phase_conjugate"));
         assert!(json.contains("bottleneck"));
+    }
+
+    /// Reconstructs `V` from `from_orthogonal_matrix`'s recorded Givens
+    /// events and diagonal signs, and checks it matches the original to
+    /// machine precision -- proving the decomposition is lossless rather
+    /// than just asserting it compiles. Reconstruction applies each
+    /// recorded rotation's *inverse* (transpose) in reverse order, starting
+    /// from `diag(diagonal_signs)`: forward elimination built
+    /// `R = G_m ... G_1 V` (`R = diag(signs)`), so
+    /// `V = G_1^T G_2^T ... G_m^T R`.
+    #[test]
+    fn orthogonal_matrix_round_trips_through_givens_schedule() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(211);
+        let d = 5;
+        // Any orthogonal matrix works as a test input; build one the same
+        // way other tests in this crate do (Procrustes rotor between two
+        // random matrices is orthogonal by construction).
+        let m1 = Array2::from_shape_fn((d, d), |_| rng.gen_range(-1.0_f64..1.0));
+        let m2 = Array2::from_shape_fn((d, d), |_| rng.gen_range(-1.0_f64..1.0));
+        let v = crate::lie_tbl_regress::procrustes_rotor(&m1, &m2);
+
+        let schedule = HardwareSchedule::from_orthogonal_matrix(&v, HardwareTarget::MziMesh);
+        assert_eq!(
+            schedule.events.len(),
+            d * (d - 1) / 2,
+            "a full triangular sweep on generic (non-degenerate) input eliminates every \
+             below-diagonal entry"
+        );
+        assert_eq!(schedule.diagonal_signs.len(), d);
+
+        let mut reconstructed = Array2::<f64>::eye(d);
+        for k in 0..d {
+            reconstructed[[k, k]] = schedule.diagonal_signs[k];
+        }
+        for event in schedule.events.iter().rev() {
+            let theta = event.theta_l;
+            let c = theta.cos();
+            let s = theta.sin();
+            let (i, j) = (event.i, event.j);
+            for k in 0..d {
+                let rj = reconstructed[[j, k]];
+                let ri = reconstructed[[i, k]];
+                reconstructed[[j, k]] = c * rj - s * ri;
+                reconstructed[[i, k]] = s * rj + c * ri;
+            }
+        }
+
+        let max_err = v
+            .iter()
+            .zip(reconstructed.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_err < 1e-10,
+            "Givens schedule must reconstruct the original orthogonal matrix, max_err={max_err:e}"
+        );
+    }
+
+    /// The concrete use case this decomposition exists for: a
+    /// `TblRotorRegressor` domain-transfer rotor (`procrustes_rotor`'s
+    /// output, used by `transfer_fit`) compiled to an MZI hardware
+    /// schedule, end to end.
+    #[test]
+    fn procrustes_rotor_compiles_to_a_valid_mzi_schedule() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(223);
+        let n = 40;
+        let d = 3;
+        let x_a = Array2::from_shape_fn((n, d), |_| rng.gen_range(-1.0_f64..1.0));
+        let x_b = Array2::from_shape_fn((n, d), |_| rng.gen_range(-1.0_f64..1.0));
+        let r_ab = crate::lie_tbl_regress::procrustes_rotor(&x_a, &x_b);
+
+        let schedule = HardwareSchedule::from_orthogonal_matrix(&r_ab, HardwareTarget::MziMesh);
+        assert_eq!(schedule.channels, d);
+        assert!(schedule.total_events() <= d * (d - 1) / 2);
+        let json = schedule.to_json_string();
+        assert!(json.contains("givens_elimination"));
+        assert!(json.contains("diagonal_signs"));
     }
 }
