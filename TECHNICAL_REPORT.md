@@ -287,3 +287,18 @@ against the table above.)
 - **Academic preprint.** Not drafted. A document combining verified results
   (this report) with the unproven claims above, under academic/journal
   framing, would read as more authoritative than warranted.
+
+**Addendum (2026-08-14, added after this report's original scope of
+`0.26.0-0.29.0`):** the first item above, "not implemented," should not be
+read as "rejected outright" — it is deferred, and specifically scoped to
+the `JOIN`/relational-operator part of the idea, where the concrete gap is
+that no mechanism was proposed for locating matching rows without an index.
+That gap does not by itself rule out representing tabular data as Clifford
+multivectors. `0.30.0` and `0.30.3` picked the non-`JOIN` parts back up
+directly: `0.30.0` shipped a small SVD/eigendecomposition-based regression
+utility (`lie_tbl_regress`); `0.30.3` prototyped the multivector
+representation itself (`lie_tbl_multivector`) and tested, rather than
+assumed, two specific claims about it — with mixed results reported
+honestly in both directions. See `RELEASE_NOTES.md`'s `0.30.3` entry for
+the measured findings; this report's original text above is left as
+written, since it was an accurate account of the state as of `0.29.0`.

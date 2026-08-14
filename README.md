@@ -140,6 +140,92 @@ that were gradually made more conservative and testable:
   rebuild (default every `16` passes) needed to avoid a real, measured
   accuracy regression from pure lazy invalidation — see the 0.29.0 section
   below for the three-stage honest measurement.
+- **Tabular regression (`lie_tbl_regress`):** `0.30.0` adds
+  `TblRotorRegressor`, standard SVD/eigendecomposition-based ridge regression
+  built on `kernel_gram::solve_kernel`'s already-tested symmetric-eigen
+  path. This is the scoped-down real part of a much larger "geometric
+  relational database" idea (`JOIN` as geometric product, tables as
+  Clifford `k`-blades) that was discussed — correction from an earlier
+  version of this README: that idea is **deferred, not rejected**; the
+  specific gap is that no working algorithm has been found yet for locating
+  matching rows without an index, which is narrower than "doesn't work at
+  all". See `TECHNICAL_REPORT.md` and the `0.30.3` section below. No `JOIN`,
+  no relational operators, no custom storage in this release; just a small,
+  tested regressor that is numerically safe on collinear/rank-deficient
+  feature columns (truncated-eigendecomposition regularization).
+- **Clifford-multivector table rudiments (`lie_tbl_multivector`):** `0.30.3`
+  prototypes the deferred part directly: columns as basis generators, rows
+  as multivectors. Proves precisely (not just claims) what this framing does
+  and doesn't add over the existing `kernel_gram` linear kernel, and tests
+  whether it can make `TblRotorRegressor` avoid forming `X^T X` — see the
+  0.30.3 section below for both findings, one confirming a real distinction
+  (the bivector part) and one a clear negative result (the direct-SVD
+  regression route, at the time).
+- **Rectangular solver fix, bivector-regularized ridge, `CliffordGramMatrix`:**
+  `0.30.4` root-caused `0.30.3`'s rectangular-SVD failure (not a missing
+  pre-spin — no rectangular "digital polish" existed at all, since the
+  crate's only exact solver was square-only) and fixed it with
+  `LieSvdSmall::solve_rectangular` (QR-reduction, machine precision). That
+  flipped the `0.30.3` regression comparison: the direct-SVD route is now
+  *more* accurate than Gram-based `fit` on the same near-collinear input.
+  Also adds `CliffordGramMatrix` (scalar `X^T X` plus pairwise column
+  bivector norms, with a `rho` invariant) and
+  `fit_with_bivector_regularization`, an anisotropic ridge variant —
+  corrected from the originally proposed direction (penalize *low*, not
+  high, bivector energy — high wedge energy marks an independent column,
+  not a redundant one) and validated with a held-out A/B test: a small but
+  consistent RMSE win over plain ridge at every regularization strength
+  tried. See the 0.30.4 section below.
+- **Missingness, dual ridge, dispatcher, rotor transfer, temporal
+  circulation, MZI export:** `0.31.0` adds five follow-ups synthesized from
+  a batch of external brainstorming, each verified rather than assumed
+  (and one proposed feature, a separate "anomaly detection" module, was
+  scoped out on inspection — it would have restated the existing
+  `rho`/bivector diagnostics). `from_columns_with_missing` implements
+  pairwise deletion (a standard technique) as the concrete working version
+  of "`NULL` as nilpotent". `fit_dual` handles the `d > n` wide-table case
+  the Gram-based fit structurally can't. `GeometricTabularDispatcher`
+  routes between `fit`, `fit_dual`, and `fit_with_bivector_regularization`
+  using a new per-*pair* wedge-magnitude signal. `procrustes_rotor` /
+  `transfer_fit` move a fitted model across a rotated domain without
+  target-domain labels. `temporal_circulation` distinguishes directed flow
+  from driftless noise via accumulated row-to-row bivector. And
+  `HardwareSchedule::from_orthogonal_matrix` compiles any orthogonal rotor
+  (including `procrustes_rotor`'s output) to an MZI schedule via Givens
+  decomposition, verified to reconstruct the original matrix to
+  `~1.19e-15`. See the 0.31.0 section below.
+- **`Subspace-Coupled JADE` (`lie_svd_subspace_jade`):** `0.32.0` extends
+  `lie_svd_joint`'s same-size joint diagonalizer to a family of matrices
+  that only share a *subset* of generator axes (different sizes allowed).
+  The originating proposal's "one dense global rotor over a zero-padded
+  ambient space" framing was corrected before implementing: it silently
+  fabricates off-diagonal energy on axes a matrix never measured whenever
+  a rotation plane has exactly one axis inside that matrix's support. The
+  fix keeps each matrix's own genuine local rotor and couples only through
+  shared angles on axis pairs multiple matrices actually observe. Verified
+  three ways: correct routing on the write-up's own `3x3`/`4x4` example
+  (untouched-pair invariant, orthogonal local rotors, connected-components
+  diagnostic); an honestly-corrected test after a wrong first expectation
+  (independent random matrices can't be exactly jointly diagonalized under
+  shared-axis coupling — measured `~69%` typical reduction, not the
+  near-zero first assumed); and a degenerate-eigenvalue construction
+  proving the coupling genuinely uses information from every participant
+  (recovered shared rotors from two different matrices agree to `~3.7e-20`).
+  See the 0.32.0 section below.
+- **Scale-balanced weighting + stabilization (`lie_svd_subspace_jade`):**
+  `0.33.0` adds `SubspaceWeighting::InverseFrobeniusSquared` (opt-in;
+  default `Unweighted` preserves `0.32.0` behavior exactly), weighting each
+  matrix by `1 / ||M_k||_F^2` (computed once — exact throughout, since
+  orthogonal conjugation preserves Frobenius norm) so a large-magnitude
+  matrix can't dominate a shared axis pair at a small one's expense.
+  Measured, direct A/B on two `2x2` matrices sharing both axes (one
+  `~1000x` larger): unweighted, the small matrix only improves `~19%`;
+  weighted, `~96%` — at a real, honestly-measured cost to the large
+  matrix's own fit (the intended trade-off, not a free lunch). Also adds
+  `SubspaceJadeStopReason` (tells an exact joint solution apart from a
+  genuine best-effort plateau) and confirms `0.32.0`'s
+  `axis_connected_components` was already public and tested — clarified
+  rather than needlessly redone. See the 0.33.0 section below.
 
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
@@ -151,7 +237,11 @@ keeps the simpler fast path.
 
 - `LieSvdSmall`: polar decomposition plus dense Jacobi polish. This is the
   conservative CPU default and the best current path for small and medium
-  dense matrices.
+  dense matrices. `0.30.4` adds `solve_rectangular` (`n x d`, any aspect
+  ratio): QR-reduction to a `min(n,d)` square factor, then the same exact
+  square solve — machine precision on rectangular input, fixing a real
+  convergence failure in the rotor-based rectangular route (see
+  `lie_svd_phaseflow` and the `0.30.4` release notes).
 - `LieSvdMicro`: tiny fixed-schedule rotor microkernels for `N <= 4`, avoiding
   the setup overhead of the general solver on very small hot blocks.
 - `LieSvdBlock4`: macro-rotor warm start built from local `4x4` SVD cells.
@@ -221,6 +311,26 @@ keeps the simpler fast path.
   shared Phase-JADE rotor field, and returns an unmixing matrix plus separated
   channels. It also reports `Channel Phase Coherence` and a simple SIR estimate
   helper for synthetic benchmarks.
+- `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes
+  `lie_svd_joint` to a family of matrices (`SubspaceMatrix`, each with its
+  own size and a `Vec<usize>` mapping local rows/columns to global generator
+  axes) that only share a *subset* of axes. No dense zero-padded ambient
+  embedding is built (a naive version of that leaks fabricated off-diagonal
+  energy onto axes a matrix never measured — corrected before implementing);
+  each matrix keeps its own local rotor, coupled to siblings only through a
+  shared Givens angle on axis pairs multiple matrices jointly observe, reusing
+  `lie_svd_joint`'s exact closed-form angle formula restricted to that
+  participant subset. `axis_connected_components` exposes which axes can
+  possibly influence each other. Verified on the write-up's own `3x3`/`4x4`
+  overlapping example, and on a degenerate-eigenvalue construction showing
+  the shared coupling genuinely pins down an otherwise-unidentifiable
+  rotation using a sibling matrix's data (recovered rotors agree to
+  `~3.7e-20`). `0.33.0` adds opt-in `SubspaceWeighting::InverseFrobeniusSquared`
+  (default stays `Unweighted`) so a large-magnitude matrix can't dominate a
+  shared pair at a small one's expense — measured `~19%` -> `~96%`
+  improvement for the small matrix in a direct A/B, at an honest cost to
+  the large one — plus `SubspaceJadeStopReason` to distinguish an exact
+  joint solution from a genuine best-effort plateau.
 - `lie_svd_tensor`: Higher-order phase SVD prototype for 3D tensors. It builds
   Gram matrices per mode, diagonalizes each mode with the robust SVD path, and
   rotates the tensor into a Tucker-style core. The current target is stable
@@ -237,6 +347,51 @@ keeps the simpler fast path.
 - `lie_svd_compiler`: hardware schedule export layer. It compiles real
   `MziPhase` and complex `ComplexMziPhase` events into a common schedule shape
   for MZI meshes or FPGA rotor meshes and can serialize that schedule to JSON.
+  `0.31.0` adds `HardwareSchedule::from_orthogonal_matrix`: any `d x d`
+  orthogonal matrix (not just a solver's own recorded event log) compiled
+  to a Givens-rotation schedule plus a leftover `+-1` diagonal
+  (`diagonal_signs`), needed because `lie_svd_small::eigh_jacobi_full`
+  doesn't log a rotation trace itself. Verified to reconstruct the original
+  matrix to `~1.19e-15` on a `5x5` test case, and used directly on
+  `lie_tbl_regress::procrustes_rotor`'s output.
+- `lie_tbl_regress`: small SVD/eigendecomposition-based ridge regression
+  utility (`TblRotorRegressor`) built on `kernel_gram::solve_kernel`. Fits
+  entirely on the `d x d` feature Gram matrix, so collinear or
+  rank-deficient feature columns are handled by truncating small
+  eigenvalues rather than inverting a singular matrix. Not a database or
+  `JOIN` engine — see `TECHNICAL_REPORT.md` for the larger idea this was
+  scoped down from. `0.30.3` adds `fit_via_rectangular_svd`, an alternate
+  fit that never forms `X^T X`; `0.30.4` fixed the rectangular solver it
+  depends on (see `lie_svd_small` below) and now measures it *more*
+  accurate than the default on near-collinear input, and adds
+  `fit_with_bivector_regularization`, an anisotropic ridge variant built on
+  `lie_tbl_multivector::CliffordGramMatrix` that beat plain ridge on
+  held-out RMSE in a direct A/B test. `0.31.0` adds `fit_dual` (kernel-trick
+  ridge via `X X^T`, for the `d > n` wide-table case the Gram-based fit
+  can't handle), `GeometricTabularDispatcher` (routes between the three fit
+  methods using a per-pair wedge-magnitude signal), and
+  `procrustes_rotor`/`transfer_fit` (orthogonal-Procrustes domain transfer
+  for paired, same-row-count tables — measured competitive with training
+  from scratch on the target domain, using zero target-domain labels).
+- `lie_tbl_multivector`: rudimentary Clifford-multivector table
+  representation (columns as basis generators, rows as multivectors),
+  `0.30.3`. Proves, rather than claims, exactly what this framing adds over
+  `kernel_gram`'s existing linear kernel: the geometric product's scalar
+  part between two rows is that same kernel (tested equal), and its
+  bivector part is genuinely new (an antisymmetric row-to-row "oriented
+  spread" measure the symmetric kernel discards). `0.30.4` adds
+  `CliffordGramMatrix`: the same idea applied to columns, pairing the
+  classical scalar Gram `X^T X` with a matrix of pairwise column bivector
+  norms and a `rho` invariant for how much of a table's structure is
+  oriented/rotational rather than colinear. `0.31.0` adds
+  `from_columns_with_missing` (pairwise deletion generalized to the
+  Clifford-product setting — the concrete working version of "`NULL` as
+  nilpotent"), `pairwise_column_stress` (the per-pair signal
+  `GeometricTabularDispatcher` needs, distinct from the existing
+  per-column-mean `column_stress`), and `temporal_circulation`/
+  `circulation_energy` (`Omega = sum_t x_t ^ x_{t+1}`, a directed-flow-vs-
+  driftless-noise discriminator — measured `~4.7x` higher circulation
+  energy on a fixed-rotation process than a bounded-noise baseline).
 - `stress_cpu`: self-contained benchmark binary with no LAPACK/OpenBLAS/faer
   dependency.
 
@@ -1039,6 +1194,321 @@ application and line-search work in `accept_offdiag_rotor`, untouched by this
 release. `jordan_defective`'s wall time barely moved (`6.654s -> 6.673s`)
 because its bottleneck-rotation count is small (`2284` vs `uniform_random`'s
 `39965`) — the cache was never its dominant cost.
+
+`0.30.0` adds `lie_tbl_regress::TblRotorRegressor`, a small scoped-down piece
+of a much larger idea. Earlier discussion proposed a "Clifford relational
+algebra": tables as `k`-blades, columns as basis generators, `JOIN` as a
+geometric contraction over a shared generator. Examined directly, that does
+not reduce to a working algorithm — a relational `JOIN` is fundamentally a
+discrete key-matching problem (duplicate keys, one-to-many relations,
+non-numeric keys), and no mechanism was proposed for locating matching rows
+without an index; "collapsing a shared generator" restates the problem
+rather than solving it. See `TECHNICAL_REPORT.md` section 6 for the full
+account of what was rejected and why.
+
+One piece of that discussion *did* reduce to a real, standard technique:
+predicting a target column from other columns via SVD/eigendecomposition-
+based ridge regression (Hastie/Tibshirani/Friedman, *The Elements of
+Statistical Learning*, section 3.4.1). `TblRotorRegressor::fit` builds the
+`d x d` feature Gram matrix `X^T X` and reuses `kernel_gram::solve_kernel`'s
+already-tested symmetric-eigen path — no new numerical code, no rectangular
+solver needed. `TblRegressParams::singular_value_floor` truncates
+near-zero eigenvalues instead of inverting them, which is what makes it
+numerically safe on collinear or rank-deficient feature columns, exactly
+where naive `(X^T X)^-1 X^T y` would need to invert a singular matrix. This
+is not a database, not a `JOIN` engine, and not claimed as algorithmically
+novel — its only point is that it's a real use for this crate's
+ill-conditioned-input-focused eigensolver on a common downstream task.
+
+**Correction to the paragraph above and to `0.30.0`'s framing generally:**
+the relational/`JOIN` idea is deferred, not rejected. The specific,
+narrower gap is that no working algorithm has been found yet for locating
+matching rows without an index in this framework — that is a fact about
+`JOIN` specifically, not a verdict on representing tables as Clifford
+multivectors at all. `0.30.3` picks the representation question back up
+directly: columns as basis generators `e_1..e_d` (`Cl(d, 0)`, Euclidean),
+rows as grade-1 multivectors `x_i = sum_j x_ij e_j`
+(`lie_tbl_multivector::RowMultivector`).
+
+Two questions were asked and answered with tests, not assumed:
+
+**Does this framing make the linear kernel Gram matrix redundant?** The
+geometric product of two rows splits as `x_i * x_k = x_i . x_k + x_i ^ x_k`
+(scalar plus bivector). The scalar part is *not* new — it's exactly
+`kernel_gram::build_gram(.., KernelKind::Linear)`, tested equal to `1e-12`
+(`multivector_scalar_gram_matches_linear_kernel`). This is because the
+geometric product between two rows produces a **sample-sample** relationship
+(one number per pair of rows), while regression needs **feature-feature**
+relationships (one number per pair of columns, summed over every row) — a
+different pair of indices entirely. No relabeling as "Clifford" removes the
+need to sum over rows to get that; the anticommuting generator structure
+(`e_j e_k = -e_k e_j`) is a fixed property of the algebra, not something
+that can encode one specific dataset's column correlations without the data
+passing through it. What *is* new: the bivector part, antisymmetric and
+zero exactly when two rows are scalar multiples of each other regardless of
+their dot product — `total_bivector_energy` is a first, tested use of it
+(zero on exactly collinear rows, positive otherwise).
+
+**Does routing the necessary accumulation through a direct SVD of `X`
+(never forming `X^T X`) beat the Gram-based fit numerically, given that
+squaring `X` into `X^T X` squares its condition number?**
+`TblRotorRegressor::fit_via_rectangular_svd` tests this directly against
+`fit`. The measured result is a clear, large loss for the direct route, not
+a nuanced tradeoff: on a `30`-sample table with one near-duplicate feature
+column, `fit` predicts with max residual `< 1e-4`, while
+`fit_via_rectangular_svd`'s raw reconstruction of the same centered matrix
+is off by `~96%`; a second check on a closer-to-square `20x15` dense matrix
+(not an extreme aspect ratio) still shows `~51%` error. The project's one
+existing test for the rectangular `PhaseFlow` route only exercises a
+near-diagonal-dominant matrix, an easy case for its pairwise-rotor sweep —
+it does not establish convergence on generic dense data, and this comparison
+shows directly that it currently lacks that property. `fit` remains the
+only recommended regression path.
+
+`0.30.4` root-caused the `0.30.3` rectangular failure instead of patching
+around it: the rotor route's golden pre-spin was already present and
+invoked (`apply_golden_prespin_rectangular`) — the real gap was that no
+rectangular "digital polish" existed at all, because `solve_with_digital_polish`
+asserts square and the crate's only exact solver
+(`lie_svd_small::LieSvdSmall`) was square-only. `LieSvdSmall::solve_rectangular`
+fixes this via QR-reduction (modified Gram-Schmidt) to a `min(n,d) x min(n,d)`
+square factor, then the existing exact square solve — QR doesn't square the
+condition number, so this routes the "avoid `X^T X`" argument through a
+solver that actually reaches machine precision (`< 1e-10`) on the shapes
+that broke the rotor route. `TblRotorRegressor::fit_via_rectangular_svd` now
+uses it, and the `0.30.3` comparison test's result flipped: its residual
+(`~3.3e-9`) is now smaller than Gram-based `fit`'s (`~1.1e-6`) on the same
+near-collinear input. `fit` stays the default; `fit_via_rectangular_svd` is
+no longer a known failure.
+
+`0.30.4` also adds `CliffordGramMatrix` (`lie_tbl_multivector`): the scalar
+Gram `X^T X` (tested equal to it) alongside a `d x d` matrix of pairwise
+column bivector norms, plus a `rho = ||bivector||_F^2 / ||scalar||_F^2`
+invariant (zero for strictly one-dimensional column data, positive
+otherwise — tested both ways). And `fit_with_bivector_regularization`, an
+anisotropic ridge built from those bivector norms — with a correction made
+*before* implementing, not after: the original proposal penalized a column
+more as its bivector energy against others grew, but a large wedge norm
+means two columns are close to *orthogonal* (wedge is maximal between
+perpendicular vectors, zero between parallel ones), so high bivector
+"stress" marks an independent, well-determined direction, not a redundant
+one. Implemented with the inverse relationship instead
+(`Lambda_jj = lambda0 / (0.1 + stress_j)`), then validated with a held-out
+train/test A/B against plain ridge (one near-duplicate column pair, two
+independent columns, noisy target): bivector-aware ridge won on held-out
+RMSE at every one of five regularization strengths tested, by a small but
+consistent and growing margin (`~0.1%` to `~1.9%`).
+
+`0.31.0` works through a batch of AI-drafted brainstorming documents handed
+over directly by the user, with the synthesis and prioritization delegated
+explicitly ("делай всё, сам сделай тз на основе этих переписок с ии"). Five
+items were built; one ("anomaly detection") was scoped out on inspection
+because it would have restated the `rho`/bivector-energy diagnostics
+`0.30.4` already shipped rather than adding anything new.
+
+`CliffordGramMatrix::from_columns_with_missing` is the concrete, working
+version of "`NULL` as a nilpotent generator" that kept coming up in
+discussion: a literal `e^2 = 0` generator does not, on its own, specify
+what to do with the rest of a row containing one. What this actually
+implements is pairwise deletion (a standard statistical technique, not
+novel) generalized to the Clifford-product construction — a column pair's
+scalar and bivector entries only accumulate over rows present in *both*
+columns. Tested exact (matches `from_columns` to `< 1e-12` with nothing
+missing, zeros a wholly-absent column's entries to `< 1e-12`) and finite
+under partial missingness (20% random, `40x5` table).
+
+`fit_dual` is the dual/kernel-trick side of ridge regression: the same
+regularized least squares problem `fit` solves, but via the `n x n` sample
+Gram `K = X X^T` (the standard "push-through identity",
+`beta = X^T(XX^T+lambda I)^-1 y`) instead of the `d x d` feature Gram. This
+matters because `fit`'s feature Gram is rank-deficient (`<= n`) whenever
+`d > n` — a "wide" table, more columns than rows — while `K` is generically
+full rank there. Matches `fit` to `~1.5e-10` coefficient error on a
+well-conditioned `n=30,d=3` table; on a genuinely underdetermined `n=8,d=20`
+wide table (`ridge_lambda=1e-6`) it stays finite and accurate
+(`max_err ~2.5e-6`, not machine precision — a nonzero ridge deliberately
+biases the fit off exact interpolation, and the test bound (`< 1e-4`) was
+calibrated to that, not loosened arbitrarily).
+
+`GeometricTabularDispatcher` routes a table to whichever fit method suits
+it: `d >= n` (feature Gram singular by construction) to `fit_dual`; a
+genuine *mix* of near-redundant and near-independent columns to
+`fit_with_bivector_regularization`; otherwise to plain `fit`. The
+redundancy/independence signal needed a new function,
+`pairwise_column_stress` — the existing `column_stress` *averages* wedge
+magnitude over every other column, which dilutes one specific redundant
+pair sitting among several unrelated, independent ones (measured directly
+on the `0.30.4` near-duplicate test table: the redundant pair's averaged
+`column_stress` comes out `~0.67`, not the near-zero value that would flag
+it, because it's diluted by two unrelated independent columns; the same
+pair's *pairwise* stress is `~0.0196`, cleanly separated from the
+independent pairs' `~0.997-0.9998`). Verified on three synthetic table
+shapes (wide, anisotropic-collinear, well-conditioned), each routed to the
+intended method.
+
+`procrustes_rotor` and `transfer_fit` implement orthogonal-Procrustes
+domain transfer: `R = UV^T` from the SVD of `X_A^T X_B`
+(`LieSvdSmall::solve_rectangular`), then `beta_b = R^T beta_a` moves a
+fitted model to a rotated domain without refitting or using any
+target-domain labels. Scope correction made before implementing: the
+original proposal described this for tables with *different* row counts,
+but `X_A^T X_B` requires matching inner dimensions — this needs paired,
+same-row-count tables, which the proposal's own validation construction
+(`X_B = X_A Q + noise`) already implicitly assumed. Measured on a
+`200`-row, `4`-column rotated-and-noisy domain (label noise `sigma=0.05` in
+both domains, so neither side gets an unrealistically clean target): the
+transferred model's held-out max residual (`~0.0578`) is close to training
+from scratch directly on the target domain (`~0.0520`, about `1.11x`) —
+competitive, using zero target-domain labels.
+
+`temporal_circulation`/`circulation_energy` (`Omega = sum_t x_t ^ x_{t+1}`,
+the accumulated row-to-row bivector across time) distinguishes a directed
+process from driftless noise. The first version of this test was
+confounded — a cumulative random-walk baseline has growing state magnitude
+that inflates every wedge term regardless of rotation, giving the
+*opposite* of the intended result at every step count tried — fixed by
+switching to a bounded i.i.d. baseline, and documented as a corrected
+mistake rather than silently patched over. Measured on a `400`-step,
+`3`-column table: a fixed-rotation process's circulation energy (`~79.3`)
+is `~4.7x` the bounded-noise baseline's (`~16.9`).
+
+`HardwareSchedule::from_orthogonal_matrix` (`lie_svd_compiler`) closes the
+loop between the two: it compiles an arbitrary orthogonal rotor — including
+`procrustes_rotor`'s output — into an MZI hardware schedule, without
+needing the solver that produced the rotor to log a rotation trace itself.
+Feasibility was checked first: `lie_svd_small::eigh_jacobi_full`, the
+solver backing most of this crate's rotors, does not record such a trace,
+and instrumenting that hot, widely shared path was judged higher-risk than
+the alternative built here — a standard Givens QR sweep on the
+already-orthogonal result. Eliminating the lower triangle of an orthogonal
+matrix leaves an orthogonal-and-upper-triangular matrix, which must be
+diagonal with `+-1` entries, so `V = G_1^T...G_m^T D` exactly (`D` now
+stored on `HardwareSchedule::diagonal_signs`, so the schedule doesn't
+silently drop it). Verified, not asserted: reconstructing a `5x5`
+Procrustes rotor from its recorded events and diagonal reproduces the
+original to `max_err ~1.19e-15`.
+
+`0.32.0` answers a direct question raised in discussion: can `lie_svd_joint`
+(Phase-JADE, which requires every matrix in a family to share one `n x n`
+size) be extended so matrices only need to share a *subset* of generator
+axes, not the full dimension? The answer is yes, but the proposal's own
+formulation of how needed a real correction, found before implementing.
+It was phrased as: zero-pad every matrix `M_k` (defined on generator subset
+`S_k`) into one shared `D x D` ambient space, and find a single global rotor
+`R` there via per-matrix projectors `P_k`. That has a genuine bug: applying
+one *shared* `D x D` rotation `G_{ij}` to every zero-padded matrix is only
+harmless when a given matrix has *both* axes `i,j`, or *neither* — if it has
+exactly one (say `i in S_k`, `j not in S_k`), the rotation mixes real data
+on axis `i` into the padded-zero axis `j`, fabricating off-diagonal energy
+on an axis that matrix never measured, which the algorithm then
+"diagonalizes away" against data that was never there. The proposal's own
+informal description of the algorithm ("применяется только к тем матрицам,
+которые содержат обе оси") already states the right rule in words, just not
+in the formal `P_k R P_k^T` version — the fix is to take that literally and
+never build the dense embedding at all: each matrix keeps its own genuine
+`d_k x d_k` local rotor, and a shared axis pair's rotation angle is computed
+jointly from whichever matrices have both axes (`lie_svd_joint`'s exact
+closed-form angle formula, reused, restricted to that data-dependent
+subset), then applied only to those matrices at their own local indices. A
+matrix missing either axis isn't touched for that step at all. One
+consequence worth stating plainly: there is in general no single dense
+`D x D` orthogonal matrix whose axis-subset submatrix recovers each
+per-matrix local rotor (a submatrix of an orthogonal matrix isn't itself
+orthogonal), so `lie_svd_subspace_jade::LieSvdSubspaceJade::diagonalize`
+returns the family of per-matrix local rotors directly rather than trying
+to assemble one global object — which is exactly what's needed downstream
+anyway, since each local rotor compiles straight to an MZI schedule via the
+same `from_orthogonal_matrix` path from earlier in this release.
+
+Three things verified, not assumed. First, correctness on the write-up's
+own example (a `3x3` matrix on axes `{0,1,2}`, a `4x4` matrix on axes
+`{1,2,3,4}`, sharing `{1,2}`): the algorithm finds exactly `8` axis pairs
+worth rotating (`3` internal to the first matrix, `6` to the second, minus
+`1` for the shared pair counted once) and correctly excludes every pair no
+single matrix jointly observes (`(0,3)`, `(0,4)`); every recovered local
+rotor stays orthogonal to `< 1e-10`; and `axis_connected_components` reports
+all five axes as one component, versus a separate construction with no
+shared axes at all, which correctly reports two independent components,
+each diagonalizing to `< 1e-10` on its own. Second, a wrong first
+expectation, caught rather than papered over: the first version of that
+same test asserted near-zero final off-diagonal energy, matching
+same-size-JADE test conventions, and failed (`initial=6.196`,
+`final=1.914`, a `~69%` reduction, not the asserted near-total one) —
+not a bug. Unlike same-size JADE, where a family built as `Q D_k Q^T` for
+one shared `Q` always has an *exact* joint solution, forcing the shared
+`(1,2)` plane to use the same angle in two matrices only has an exact
+solution when their true diagonalizing rotors happen to agree on that
+shared sub-block, which two independently-random rotors generically don't;
+measured across 10 seeds, the achievable reduction ratio ranges `~0.007` to
+`~0.45`, and the test was corrected to assert a real, safely-bounded
+reduction instead of an unreachable target. Third, whether the coupling
+actually uses every participant's information: built a shared `2x2` block
+with a genuinely common rotor `Q_sh`, but a *degenerate* (repeated)
+eigenvalue in the first matrix's copy of it — `M1` alone cannot identify
+`Q_sh` from a repeated eigenvalue (any rotation within that eigenspace
+diagonalizes it equally well) — while the second matrix's copy uses a
+distinct spectrum and pins it down uniquely. The family converges to
+`~1.0e-15` off-diagonal energy in a single sweep, and the two matrices'
+recovered local rotors, restricted to their own local indices for the
+shared axes, agree with each other to `~3.7e-20` — direct evidence the
+degenerate matrix's ambiguity was resolved using the *other* matrix's data,
+not left arbitrary.
+
+`0.33.0` is a stabilization cycle on `lie_svd_subspace_jade`, closing two
+follow-ups — one genuinely new, one already shipped and just clarified
+rather than quietly redone. `axis_connected_components` was already public
+and tested in `0.32.0`; reimplementing it here would have falsely implied
+it was missing before, so that request was answered by pointing at the
+existing function and its existing tests instead of writing new code that
+duplicates it.
+
+The real addition is scale-balanced weighting. `0.32.0`'s module doc
+comment already flagged, as an explicit scope note, that a shared axis
+pair's angle sums participating matrices' raw entries unweighted — a
+matrix with much larger entries than its siblings dominates any pair it's
+in. `SubspaceJadeParams::weighting`, a new `SubspaceWeighting` enum
+(`Unweighted` default, `InverseFrobeniusSquared` opt-in), fixes this:
+each matrix gets weight `1 / ||M_k||_F^2`, computed once from the input,
+not recomputed every sweep — which is exact rather than an approximation
+that goes stale, because orthogonal conjugation preserves Frobenius norm
+exactly (`||R^T M R||_F = ||M||_F`), so `||M_k||_F` never changes as the
+algorithm rotates `M_k`. The near-zero-norm floor guarding the division is
+scale-relative to the family's own mean squared norm, not an absolute
+constant — the identical fix already made once in this project to
+`lie_svd_small::qr_reduce`'s rank-deficiency threshold, for the identical
+reason: an absolute floor is wrong whenever the family's own scale isn't
+known ahead of time. `SubspaceJadeTrace::initial_offdiag`/`final_offdiag`
+stay in raw (unweighted) Frobenius units regardless of the weighting mode,
+so they remain physically meaningful and comparable across modes rather
+than an artifact of whichever scheme was picked — which also means, stated
+explicitly rather than left to be discovered by surprise, that the raw
+total is not guaranteed to shrink on every single sweep once weighting is
+active: that's the intended trade-off (favoring the up-weighted matrix's
+fit over the down-weighted one's), not a bug.
+
+Measured with a direct A/B, not assumed: two `2x2` matrices sharing both
+axes, one built `~1000x` larger in scale than the other, from two
+genuinely different rotations (so no exact joint solution exists — there's
+a real trade-off in which single shared angle to pick). Unweighted, the
+large matrix ends up almost fully diagonalized (`~1.37e6 -> ~2.0e-7`) while
+the small matrix barely improves (`~1.96 -> ~0.380`, a `~19%` reduction) —
+the shared angle serves the large matrix almost entirely. Weighted
+(`InverseFrobeniusSquared`), the small matrix improves far more
+(`~1.96 -> ~0.0858`, a `~96%` reduction) at a real, honestly-measured cost
+to the large matrix (`~1.37e6 -> ~1.94e5`, barely reduced at all) — exactly
+the redistribution the mechanism predicts, not a free lunch.
+
+Two small, cheap additions came out of stabilizing the module for practical
+use, not explicitly requested but directly load-bearing: `SubspaceJadeStopReason`
+(`ReachedTolerance` / `Plateaued` / `MaxSweepsReached`) on the trace, so a
+caller can tell an exact joint solution apart from a genuine best-effort
+compromise without inferring it from raw numbers — verified on both of
+`0.32.0`'s own reference constructions (the degenerate-eigenvalue case
+reaches tolerance; the independent-random-matrix case plateaus); and a
+direct end-to-end test compiling a subspace-JADE local rotor straight
+through `0.31.0`'s `HardwareSchedule::from_orthogonal_matrix`, confirming
+the two pieces of generator-coupled work from the last two releases connect
+with no glue code needed.
 
 `0.22.0` adds the unified phase engine, hardware schedule compiler, `--full-suite`
 CLI smoke, and a stricter complex Hermitian/QR polish path:
