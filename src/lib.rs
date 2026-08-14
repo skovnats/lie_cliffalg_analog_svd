@@ -16,6 +16,7 @@ pub mod kernel_gram;
 pub mod lie_svd;
 pub mod lie_svd_adaptive;
 pub mod lie_svd_analog;
+pub mod lie_svd_benchmarks;
 pub mod lie_svd_block4;
 pub mod lie_svd_bss;
 pub mod lie_svd_compiler;
