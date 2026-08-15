@@ -2358,6 +2358,123 @@ Cardoso's datasets, Frank/Forsythe/Parter/Cauchy until `0.35.0`) and
 recorded the reason, rather than silently dropping scope or silently
 overreaching into unverified territory.
 
+### `src/phase_normalizer.rs`
+
+`0.42.0`: canonical, rotation-invariant, permutation-equivariant row/column
+ordering, prompted by a genuinely interesting question -- does this crate's
+generator ontology imply a *natural* ordering of a matrix's rows/columns,
+from the geometry itself rather than a heuristic like column-pivoting?
+
+**The math that holds up.** `G = a @ a^T` (the row Gram matrix) is exactly
+unchanged by `a -> a @ R` for any orthogonal `R` (a rotation/reflection of
+the column/generator space): `(aR)(aR)^T = a R R^T a^T = a a^T`. Under a
+row permutation `a -> P @ a`, `G -> P G P^T`. Any score built purely from
+`G`'s own entries therefore automatically inherits both properties --
+rotation invariance and permutation equivariance -- with no extra work,
+verified directly (not just algebraically) in
+`canonical_scores_are_rotation_invariant_and_permutation_equivariant`. The
+score used, `S_i = G_ii * (1 + Omega_i) * h_i`:
+
+- `G_ii = ||row_i||^2`.
+- `Omega_i = sum_{j != i} sqrt(max(0, G_ii*G_jj - G_ij^2))`, a "wedge
+  capacity" (total oriented area row `i` spans against every other row).
+  The `max(0, ..)` clamp matters for a reason specific to this module's
+  second use case (below): for a genuine Gram matrix the radicand is
+  `>= 0` by Cauchy-Schwarz, but the joint-diagonalization family case
+  feeds in matrices that are symmetric but not necessarily PSD (lagged
+  covariances, cumulants), where it can go negative -- clamped to `0`
+  rather than producing `NaN`.
+- `h_i = ||Q_{i,:}||^2`, a statistical leverage score, `Q` the
+  orthonormal-column basis of `col(a)` taken directly from
+  `LieSvdSmall::solve_rectangular`'s own `U` (reused, not recomputed).
+  Deliberately *not* `[a (a^T a)^+ a^T]_ii`: forming `a^T a` explicitly
+  squares the condition number before doing anything else with it, exactly
+  what `lie_svd_small`'s own module doc comment already identifies as the
+  reason to prefer polar/QR routes over normal equations elsewhere in this
+  crate -- the same discipline applied here rather than treated as a
+  one-off exception because this is "only" a preprocessing score. `h_i` is
+  trivially `1` for every row of a full-rank square matrix (`Q` is then a
+  full orthogonal matrix, every row unit norm already) -- a correct
+  degeneracy, not a bug: leverage only discriminates rows of a genuinely
+  rectangular input.
+
+**A performance claim that did not survive reading its own source
+material.** The originating proposal claimed pre-sorting by this score
+would speed up Jacobi-style sweeps `~20-40%`, citing a toy-numpy benchmark
+it had generated itself. Reading that benchmark's *printed* per-sweep
+numbers (not its prose conclusion) directly:
+
+| sweep | unordered | canonically ordered | ratio (unord/ord) |
+| ---: | ---: | ---: | ---: |
+| 1 | 2.2e-2 | 3.2e-1 | 0.069 (ordered **14.5x worse**) |
+| 2 | 9.3e-4 | 1.4e-2 | 0.068 (ordered **14.8x worse**) |
+| 3 | 9.9e-6 | 1.6e-5 | 0.621 (ordered **1.6x worse**) |
+| 4 | 8.9e-7 | 1.3e-7 | 6.709 (ordered 6.7x better) |
+| 5 | 1.3e-11 | 1.8e-9 | 0.007 (ordered **145x worse**) |
+
+Ordered is worse at 4 of the 5 sweeps checked, dramatically so at the final
+(most-converged) one. The specific line the proposal's own argument leaned
+on -- "Sweep 3 ratio: 0.62x lower off-diagonal error" -- is a misreading of
+its own arithmetic: `ratio = unordered/ordered = 0.62 < 1` means the
+*unordered* run had the lower error at that sweep, the opposite of what the
+sentence claims. This also matches a structural reason for skepticism
+independent of the buggy benchmark: cyclic Jacobi visits every pair exactly
+once per sweep regardless of order, so a *dense* sweep's convergence rate
+is governed mainly by the spectrum, not the pair-visitation order --
+unlike sparse direct factorization, where reordering (reverse Cuthill-McKee,
+spectral bisection) genuinely changes bandwidth and fill-in and is a
+well-established technique for exactly that reason.
+
+**The honest A/B run in its place**
+(`phase_normalizer_does_not_reliably_speed_up_jacobi_convergence`): this
+crate's own `eigh_jacobi_full` (cyclic Jacobi symmetric eigensolver, not a
+toy reimplementation), with vs. without canonical pre-sorting, `20` trials,
+`n=48`, a clustered-spectrum construction matching
+`profiles::Profile::DegenerateSpectrum`. Measured wall-time ratio
+(canonical/plain) across four independent runs of this exact test:
+`0.9588`, `0.9530`, `0.9491`, `0.9299` -- a small, fairly repeatable
+`~4-7%` reduction on this one specific construction, not the claimed
+`~20-40%`, and not checked against any other matrix structure. The test
+does not gate on this ratio (a single-machine, single-construction timing
+number is not something to assert a test suite against); it gates on the
+two routes reaching the *same* recovered spectrum (`<1e-8`), which is the
+actual correctness bar.
+
+**A real correctness bug in the original proposal, caught and fixed before
+implementing, not after.** For a joint-diagonalization family
+(`lie_svd_joint`, classical same-size JADE), the proposal's own phrasing
+("нужно каждый нормализовать" -- normalize each one) -- if taken literally
+as an independent permutation chosen per family member -- would break joint
+diagonalization outright: axis `i` in matrix 1 would no longer correspond
+to axis `i` in matrix 2, destroying the shared-generator identity the whole
+method depends on. This is the same *class* of bug `0.32.0`'s
+`Subspace-Coupled JADE` already found and fixed once (a zero-padded
+ambient embedding there; an independent per-member permutation here --
+structurally different bugs, same underlying lesson: shared axes must stay
+shared). `canonical_family_order` instead computes each member's own
+`canonical_row_scores` (treating `M_k` itself as the Gram-like object --
+its diagonal and off-diagonal entries already mean "energy on axis `i`"
+and "correlation between axes `i,j`", the same interpretation `G_ii`/`G_ij`
+carry for a literal Gram matrix, which is exactly `M_k`'s role in a JADE
+family) and sums them across the family, `S_i = sum_k S_i(M_k)`, deriving
+**one** shared `CanonicalOrder` applied identically to every member.
+Verified end to end in
+`subspace_jade_family_is_invariant_to_shared_axis_order`: a family jointly
+diagonalized by `LieSvdJoint::diagonalize_symmetric` recovers the same
+spectra whether its shared axes arrive in their natural order or an
+arbitrarily shuffled one.
+
+**What the module actually delivers, restated plainly.** Not a speedup --
+invariance. `lie_svd_small_solve_is_invariant_to_input_row_order` verifies
+the headline property directly: the same underlying data, fed through
+`canonical_row_order` -> permute -> `LieSvdSmall::solve` -> `restore_rows`,
+in two different (deliberately shuffled) input row orders, produces
+byte-for-byte-equivalent (`<1e-9`) output. That is a real, useful property
+independent of any claim about which particular canonical order is
+"best" -- reproducibility that doesn't depend on incidental input ordering,
+and a canonical form for comparing or deduplicating otherwise-equivalent
+inputs.
+
 ### `src/lie_svd_tensor.rs`
 
 Higher-order phase SVD / Tucker-style tensor prototype.

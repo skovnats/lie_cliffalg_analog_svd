@@ -56,8 +56,8 @@ assert the comparison, not a threshold, so a reversal announces itself.
 Two preprints describe the method and its measured limits: Part I (operators)
 and Part II (tables and heterogeneous coupling). DOIs below.
 
-- **Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra)**; [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
-- **Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II)**; [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
+- Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra); [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
+- Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II); [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
 
 ## Reproduce
 
@@ -538,6 +538,30 @@ extraction, streaming low-rank tracking, and this external-reference
 comparison — each cycle scoping explicitly what it would and wouldn't
 attempt, rather than silently dropping or silently overreaching.
 
+- **Canonical, rotation-invariant row/column ordering
+  (`phase_normalizer`):** `0.42.0` answers a direct question — does this
+  crate's generator ontology imply a *natural* ordering of a matrix's
+  rows/columns, from the geometry itself rather than a pivoting heuristic?
+  Yes, via the Gram matrix (`G = a @ a^T` is exactly invariant to
+  `a -> a @ R` for orthogonal `R`, and transforms as `P G P^T` under row
+  permutations `P`, so any score built from it inherits both properties
+  automatically — verified directly, not just algebraically). The
+  originating proposal's own performance claim (`~20-40%` faster Jacobi
+  convergence from pre-sorting) didn't survive reading its own cited
+  benchmark's *printed numbers*, which show sorting making things worse at
+  4 of 5 sweeps checked, by up to `~145x` at the most-converged one — a
+  misread ratio in the source material, corrected here rather than
+  propagated. A fresh, honest A/B on this crate's own `eigh_jacobi_full`
+  measured a real but modest `~4-7%` wall-time reduction on one specific
+  construction, reported as exactly that, not inflated into the original
+  claim. What's actually shipped: canonicalize → solve → restore makes a
+  solver's output provably independent of input row/column order (checked
+  to machine precision, not "close"), correctly extended to joint-
+  diagonalization families via one shared permutation summed across the
+  family's per-axis scores — an independent per-matrix permutation would
+  have broken JADE's shared-axis semantics, the same class of bug `0.32.0`
+  already found and fixed once, for a different reason.
+
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
 On ordinary random, extreme ill-conditioned, sparse structured, nearly
@@ -716,6 +740,27 @@ keeps the simpler fast path.
   200-bit precision (plain `f64` already `~5.4%` off by `n=12`, a
   solver-independent representation-error measurement). See
   `compare/README.md` for the full numbers and how to build it.
+- `phase_normalizer`: `0.42.0`, canonical rotation-invariant, permutation-
+  equivariant row/column ordering. The score `S_i = G_ii*(1+Omega_i)*h_i`
+  (`G = a @ a^T`, `Omega_i` a Cauchy-Schwarz-clamped row-wedge capacity,
+  `h_i` a leverage score computed via `LieSvdSmall::solve_rectangular`'s own
+  `U` rather than `a^T a`'s pseudo-inverse) is built entirely from the Gram
+  matrix, so it's automatically both rotation-invariant and permutation-
+  equivariant — verified directly, not assumed. A performance claim in the
+  originating proposal (`~20-40%` faster Jacobi convergence from
+  pre-sorting) didn't survive reading its own cited benchmark's printed
+  numbers, which show the opposite at most sweeps checked; a fresh, honest
+  A/B on this crate's own `eigh_jacobi_full` measured a real but modest
+  `~4-7%` wall-time reduction on one specific construction, not `20-40%`
+  on anything general — reported as exactly that. What *is* shipped and
+  verified: canonicalize → solve → restore gives byte-for-byte-equivalent
+  (to machine precision) output regardless of input row/column order, and
+  `canonical_family_order` extends this correctly to joint-diagonalization
+  families by summing per-axis scores across the family into **one**
+  shared permutation (an independent per-matrix permutation would break
+  JADE's shared-axis semantics — the same class of correctness bug
+  `0.32.0`'s `Subspace-Coupled JADE` already found and fixed once, for a
+  different reason).
 - `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes
   `lie_svd_joint` to a family of matrices (`SubspaceMatrix`, each with its
   own size and a `Vec<usize>` mapping local rows/columns to global generator

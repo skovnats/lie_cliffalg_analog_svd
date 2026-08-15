@@ -1,5 +1,83 @@
 # Release Notes
 
+## 0.42.0
+
+`phase_normalizer` — canonical, rotation-invariant, permutation-equivariant
+row/column ordering, prompted by a genuinely interesting question: does
+this crate's Clifford/generator ontology imply a *natural* ordering of a
+matrix's rows and columns, derived from the geometry itself rather than a
+heuristic like column-pivoting? Answered concretely: yes, via the row/column
+Gram matrix, with a correction made to the proposal's own performance claim
+before it went anywhere near documentation.
+
+**A claim caught and corrected before implementing, using the proposal's
+own pasted evidence.** The originating write-up claimed pre-sorting rows/
+columns by this canonical order would speed up Jacobi-style sweeps by
+`~20-40%`, citing its own toy-numpy benchmark. Reading that benchmark's
+*printed numbers* directly (not its prose conclusion) shows the opposite at
+4 of 5 sweeps checked — the "canonically sorted" order had higher
+off-diagonal energy than the unsorted baseline, by up to `~145x` at the
+most-converged sweep measured. The specific line the write-up's own
+argument leaned on ("Sweep 3 ratio: 0.62x lower off-diagonal error") is a
+misreading of its own ratio: `0.62 < 1` there means the *unordered* run had
+the lower error, i.e. sorting was worse at that sweep, not better. This
+matches a general, structural reason for skepticism independent of the
+buggy benchmark: cyclic Jacobi visits every pair once per sweep regardless
+of order, so a *dense* sweep's convergence is governed mainly by the
+spectrum, not visitation order — unlike sparse direct factorization, where
+reordering (reverse Cuthill-McKee, spectral bisection) genuinely changes
+bandwidth/fill-in.
+
+**What actually shipped, redirected toward a claim that's both true and
+useful:** not "faster," but **invariant**. Canonicalizing a matrix's row/
+column order before solving and restoring it afterward makes the whole
+pipeline's output independent of which order the caller's rows/columns
+happened to arrive in — verified directly, output identical to machine
+precision across two differently-ordered inputs of the same underlying
+data, not just "close."
+
+- **The score**, `S_i = G_ii * (1 + Omega_i) * h_i` (`G = a @ a^T`,
+  `Omega_i` the Cauchy-Schwarz-clamped row-wedge "capacity", `h_i` a
+  statistical leverage score) is built entirely from `G`, so it is
+  automatically both rotation-invariant (`a -> a @ R` for orthogonal `R`
+  leaves `G` exactly unchanged) and permutation-equivariant
+  (`a -> P @ a` gives `G -> P G P^T`) — verified directly in
+  `canonical_scores_are_rotation_invariant_and_permutation_equivariant`,
+  not assumed from the algebra alone.
+- **Leverage computed via `LieSvdSmall::solve_rectangular`'s own `U`**
+  (`h_i = ||Q_{i,:}||^2`), not via `[a (a^T a)^+ a^T]_ii` — the latter
+  would form `a^T a` and square the condition number before doing anything
+  else, exactly what `lie_svd_small`'s own module doc comment already
+  flags as the reason to prefer polar/QR routes over normal equations.
+- **A real correctness bug in the original proposal, fixed before
+  implementing:** for a joint-diagonalization family (`lie_svd_joint`,
+  same-size JADE), the write-up's own phrasing ("нужно каждый
+  нормализовать" — normalize each one) would, if taken literally as an
+  independent per-matrix permutation, break joint diagonalization outright
+  — axis `i` in matrix 1 would no longer correspond to axis `i` in matrix
+  2, the same class of bug `0.32.0`'s `Subspace-Coupled JADE` already found
+  and fixed once for a structurally different reason. `canonical_family_order`
+  instead sums every member's own per-axis score,
+  `S_i = sum_k S_i(M_k)`, and derives **one shared permutation** applied
+  identically to the whole family — verified end to end in
+  `subspace_jade_family_is_invariant_to_shared_axis_order` (a jointly-
+  diagonalized family recovers the same spectra whether its shared axes
+  arrive in their natural order or an arbitrarily shuffled one).
+- **The honest A/B, run rather than assumed:** `eigh_jacobi_full`
+  (this crate's own cyclic Jacobi symmetric eigensolver) with vs. without
+  canonical pre-sorting, `20` trials, `n=48`, a clustered-spectrum
+  construction. Measured wall-time ratio (canonical/plain) across four
+  independent runs: `0.93`-`0.96` — a small, fairly repeatable `~4-7%`
+  reduction on this specific construction, not the claimed `~20-40%`, and
+  not verified on any other matrix structure. Reported as exactly that:
+  modest and construction-specific, neither "no effect" nor "the claimed
+  effect." The test does not gate on this ratio (a single-machine timing
+  number is not a stable thing to assert on); it gates on both routes
+  reaching the same recovered spectrum.
+
+161/161 tests pass (157 carried over plus 4 new), `cargo fmt --check` and
+`cargo clippy` clean.
+
 ## 0.41.0
 
 Sixth and final cycle of the robustness/frontier-benchmark program: an

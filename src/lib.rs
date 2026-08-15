@@ -39,6 +39,7 @@ pub mod lie_svd_topowarm;
 pub mod lie_svd_traceflow;
 pub mod lie_tbl_multivector;
 pub mod lie_tbl_regress;
+pub mod phase_normalizer;
 
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
