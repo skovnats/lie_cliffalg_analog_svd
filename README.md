@@ -56,8 +56,8 @@ assert the comparison, not a threshold, so a reversal announces itself.
 Two preprints describe the method and its measured limits: Part I (operators)
 and Part II (tables and heterogeneous coupling). DOIs below.
 
-- Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra); [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
-- Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II); [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
+- **Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra)**; [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
+- **Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II)**; [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
 
 ## Reproduce
 
