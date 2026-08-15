@@ -1,5 +1,146 @@
 # Release Notes
 
+## 0.44.0
+
+Golden Master / long-term stability freeze. Three pieces of work, all
+mechanical or ergonomic — no new solver logic, no new claims.
+
+**1. API facades.** `solve_canonicalized` and
+`diagonalize_symmetric_canonicalized` wrap the `canonicalize -> solve ->
+restore` pattern that `0.43.0`'s bug hunt showed is easy to get wrong by
+hand — that cycle's Higham/Hansen test originally undid only one of two
+permutation layers and silently produced a spurious `~1.0` "difference."
+`CanonicalSvdResult` (`u`/`sigma`/`vt`) and `CanonicalJadeResult`
+(`basis`/`diagonals`/`trace`) come back already restored to the caller's
+original row/column order, with the `CanonicalOrder` used (scores,
+permutation, inverse permutation) attached for anyone who needs it
+directly, rather than hidden inside the call. Two new tests confirm both
+facades are invariant to input row/column order end to end.
+
+**2. Zero-warning audit.** `cargo clippy --all-targets -- -D warnings`,
+`cargo fmt --check`, and `cargo test --all-targets --locked` all pass
+clean, and a fresh `docker build --no-cache` reproduces the same test
+count and the same baseline `stress_cpu` profile table. Of the warnings
+clippy raised at the start of this pass (some visible only under
+`--all-targets`, which compiles test code that `--lib` alone skips), the
+large majority were genuine and fixed: `cargo clippy --fix` handled the
+mechanical ones, and by hand — needless range loops rewritten with
+`.enumerate()`, chained `.min().max()` replaced by `.clamp()`, an
+unnecessary reference removed, `k % 2 == 0` replaced by
+`k.is_multiple_of(2)`, and one pair of intentionally-identical `if`/`else`
+branches (two different trigger conditions sharing one depth-boost policy
+in `lie_svd_phaseflow`) documented in place rather than merged, since
+merging would have hidden which condition is which. The remaining 29
+(21 `type_complexity`, 8 `too_many_arguments`) are pre-existing
+solver-internal signatures — `(U, Sigma, Vt[, Trace])`-shaped return
+tuples and hot-path parameter lists in `lie_svd_adaptive`,
+`lie_svd_analog`, `lie_svd_block4`, `lie_svd_complex`, `lie_svd_coreflow`,
+`lie_svd_engine`, `lie_svd_hybrid`, `lie_svd_joint`, `lie_svd_phaseflow`,
+`lie_svd_traceflow`, and `bin/stress_cpu` — left as-is with a one-line
+justified `#[allow]` at each site rather than restructured: a stability
+freeze is the wrong moment to touch already-verified numerical code for a
+purely cosmetic win.
+
+**3. Documentation freeze.** README, ARCHITECTURE, and these release notes
+are updated to describe the facades and record the stable, fully verified
+state this release is meant to hold.
+
+168/168 tests pass (166 carried over from `0.43.0` plus 2 new facade
+invariance tests). `compare/`'s isolation from the main crate (own
+workspace marker, own `Dockerfile`, zero heavy dependencies leaking into
+the main crate's `Cargo.lock`) reconfirmed unchanged.
+
+With this release the codebase moves to an indefinite stable pause: no
+further feature work is planned unless a new, concrete need arises.
+
+## 0.43.0
+
+Extends `phase_normalizer`'s validation from `0.42.0`'s own primitives to
+five domains where axis order is structurally load-bearing: BSS/JADE,
+streaming SVD, the Hubbard dimer's near-degenerate gap, the Higham/Hansen
+matrix suite, and MZI phase-schedule smoothness. Three premise corrections
+were made before writing any test, each catching a proposed claim that
+didn't hold up:
+
+- **Hubbard dimer permutation test**: `P H P^T` is an orthogonal similarity
+  transform, and eigenvalues are *exactly* invariant under any such
+  transform, with or without canonicalization -- a basic linear-algebra
+  fact, not a `phase_normalizer` benefit. Implemented as a solver-
+  correctness check instead of a canonicalization-benefit claim.
+- **Streaming replay test**: a canonical, Gram-based column order needs the
+  *entire* stream's Gram matrix, i.e. full lookahead -- the opposite of
+  what "streaming" means. Reframed explicitly as an offline-replay
+  experiment on an already-collected dataset, not an online capability.
+- **BSS "eliminates Hungarian matching" claim**: canonicalizing input
+  channel order cannot remove BSS's fundamental source-identifiability
+  ambiguity relative to *ground truth* labeling -- that ambiguity is a
+  property of blind separation itself. What it can do (and what's tested):
+  make the recovered unmixing matrix's *input-channel* identity independent
+  of incidental channel ordering. The Amari index (`0.34.0`) already
+  sidesteps needing Hungarian matching for evaluation, independent of
+  canonicalization.
+
+**Two real bugs found and fixed while building the tests, not designed
+around in advance:**
+
+1. A missing composition step: `canonicalize -> solve -> restore` under an
+   *independent* row-shuffle-then-canonicalize (two layers of permutation)
+   requires undoing *both* layers on restore, innermost first. The first
+   version of the Higham/Hansen test undid only the canonicalization layer,
+   leaving results in shuffled-row space and producing a spurious `~0.95`
+   to `1.0` "difference" against the natural-order run that was actually
+   just an unaccounted-for permutation, not a real numerical disagreement.
+2. `CanonicalOrder::from_scores`'s tie-breaking rule (by current index) is
+   not itself permutation-invariant, so inputs with genuine score ties
+   don't resolve to a single canonical matrix. Discovered directly: the
+   Hubbard dimer's basis states `1,2` are structurally tied (identical
+   canonical scores, by the physics), and `24` input permutations produced
+   `4` distinct canonical matrices, not `1`. Documented as a real,
+   honest limitation rather than silently asserted away; the test instead
+   checks the weaker property that does hold regardless of ties (sorted
+   score *values* agree across every permutation).
+
+A third, more subtle finding, also surfaced by testing rather than assumed:
+`truncated_svd_solve` on Hansen's `heat`/`shaw` problems is genuinely
+sensitive to floating-point noise near the regularization cutoff --
+mathematically-equivalent but not bit-identical computation paths (direct
+solve vs. canonicalize/solve/restore) can differ by tiny amounts in `U`,
+which a near-zero `sigma[i]` divides back up into a much larger difference
+in the regularized solution. Not a `phase_normalizer` bug: a standard
+ill-posed-inverse-problem sensitivity (the reason regularization exists at
+all). Fixed by using a floor (`1e-4`) that sits at `shaw`'s own natural
+spectral gap (`~1.2e-3` to `~6.3e-5`, an `~18x` drop) rather than loosening
+an assertion arbitrarily.
+
+**Results:**
+
+| Domain | Natural | Shuffled (uncorrected) | Canonicalized |
+| --- | --- | --- | --- |
+| BSS Amari index (lower is better) | `1.296e-3` | `5.486e-1` | `1.296e-3` |
+| Hubbard dimer eigenvalues (max diff vs. closed form) | -- | `~1e-16` to `5e-16` across all `24` basis permutations (exactly invariant, as expected) | same |
+| Higham/Hansen SVD (Kahan/Forsythe/Pei/heat/shaw, `rel_recon`/`orth` after restore) | -- | -- | `<1e-8` for all `5` matrices |
+| Hansen `truncated_svd_solve` (heat/shaw, `x_diff` after restore, `floor=1e-4`) | -- | -- | `~5e-12` |
+| Streaming rank-3 detection step (offline replay, `80`-column stream) | step `40` (chronological) | step `2` | step `2` (lookahead-sorted) |
+| Streaming final subspace residual | `6.1e-15` | `1.0e-14` | `5.6e-15` |
+| MZI Givens total variation (`8x8` rotor, mean of `10` trials) | `30.23` | `28.97` | `29.33` |
+
+Two results reported as genuinely mixed or null, not massaged into a clean
+story: the streaming "detection speed" comparison is confounded (shuffling
+an `80`-column stream with `40` rank-3-content columns interleaves that
+content throughout regardless of *which* reordering criterion is used, so
+both `shuffled` and `lookahead` detecting the rank jump at step `2` reflects
+when evidence arrived, not the ordering criterion's quality) -- flagged
+directly rather than presented as a canonicalization win. The MZI
+smoothness hypothesis (canonicalized order gives smoother phase schedules)
+is not confirmed by this measurement: `shuffled` was marginally smoothest
+of the three, `canonicalized` sat between `natural` and `shuffled`, and the
+spread (`~29-30`) is modest enough that a stronger claim isn't warranted
+from `10` trials.
+
+166/166 tests pass (157 carried over plus 9 new — one extended from
+`0.42.0`'s single-matrix invariance test to a `5`-matrix version plus a
+downstream-use check), `cargo fmt --check` and `cargo clippy` clean.
+
 ## 0.42.0
 
 `phase_normalizer` — canonical, rotation-invariant, permutation-equivariant

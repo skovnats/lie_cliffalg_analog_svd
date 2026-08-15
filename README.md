@@ -561,6 +561,42 @@ attempt, rather than silently dropping or silently overreaching.
   family's per-axis scores — an independent per-matrix permutation would
   have broken JADE's shared-axis semantics, the same class of bug `0.32.0`
   already found and fixed once, for a different reason.
+- **Validation across five domains where axis order is load-bearing:**
+  `0.43.0` extends `phase_normalizer`'s checks from single matrices to BSS/
+  JADE, streaming SVD, the Hubbard dimer's near-degenerate gap, the
+  Higham/Hansen matrix suite, and MZI schedule smoothness — after
+  correcting three proposed claims before writing any test (eigenvalues
+  are *already* exactly permutation-invariant by basic linear algebra, so
+  a "does canonicalization preserve the Hubbard gap" test is a solver-
+  correctness check, not a canonicalization benefit; a canonical column
+  order needs the whole stream's Gram matrix, i.e. full lookahead, so the
+  streaming test is explicitly an offline replay, not an online claim;
+  canonicalizing BSS channels can't remove blind separation's inherent
+  source-identifiability ambiguity, only incidental-channel-order
+  dependence). Two real bugs were found *while building the tests*, not
+  designed around in advance: a missing composition step when restoring
+  through two layers of permutation (produced a spurious `~1.0` "difference"
+  that was actually just an unaccounted-for permutation), and a genuine tie-
+  breaking limitation (`CanonicalOrder`'s current-index tie-break isn't
+  itself permutation-invariant — the Hubbard dimer's structurally
+  symmetric basis states `1,2` produced `4` distinct canonical matrices
+  across `24` input permutations, not `1`, documented as a real limitation
+  rather than hidden). The MZI smoothness hypothesis was *not* confirmed
+  by measurement (shuffled input was marginally smoothest of the three
+  conditions tested, not canonicalized). See the 0.43.0 section below for
+  the full results table.
+- **API facades and a Golden Master freeze:** `0.44.0` adds
+  `solve_canonicalized` and `diagonalize_symmetric_canonicalized`, wrapping
+  the `canonicalize -> solve -> restore` pattern directly motivated by
+  `0.43.0`'s missing-composition bug — the restored `U`/`Sigma`/`Vt` (or
+  `basis`/`diagonals`/`trace`) come back in the caller's original row/
+  column order, with the `CanonicalOrder` used still attached for anyone
+  who needs the scores or permutation directly. This release is otherwise
+  a stability freeze: a full `cargo clippy --all-targets -- -D warnings` /
+  `cargo fmt --check` / `cargo test --all-targets --locked` pass with zero
+  warnings, a fresh `docker build --no-cache` reproducing the same
+  168/168-test result and baseline `stress_cpu` profile table, and no new
+  solver logic or claims. See the 0.44.0 section below.
 
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
@@ -760,7 +796,12 @@ keeps the simpler fast path.
   shared permutation (an independent per-matrix permutation would break
   JADE's shared-axis semantics — the same class of correctness bug
   `0.32.0`'s `Subspace-Coupled JADE` already found and fixed once, for a
-  different reason).
+  different reason). `0.44.0` adds `solve_canonicalized` and
+  `diagonalize_symmetric_canonicalized`, facades that run the full
+  canonicalize → solve → restore pattern and hand back results already in
+  the caller's original order (plus the `CanonicalOrder` used), so callers
+  don't have to get the two-layer-restore composition right by hand — the
+  exact class of bug `0.43.0`'s own Higham/Hansen test first hit.
 - `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes
   `lie_svd_joint` to a family of matrices (`SubspaceMatrix`, each with its
   own size and a `Vec<usize>` mapping local rows/columns to global generator
@@ -1039,6 +1080,15 @@ the exact rotor microkernel used inside one selected row/column plane.
 This is an experimental research release. Use it for exploration, benchmarking,
 and hardware-oriented algorithm design. For production numerical software, keep
 comparing against LAPACK-class solvers.
+
+**`0.44.0` is a Golden Master / long-term stability freeze.** 168/168 tests
+pass; `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and
+`cargo test --all-targets --locked` are all clean; a fresh
+`docker build --no-cache` reproduces the same test result and the same
+baseline `stress_cpu` profile table. `compare/`'s isolation from the main
+crate — own workspace marker, own `Dockerfile`, zero heavy dependencies in
+the main crate's `Cargo.lock` — is unchanged. No further feature work is
+planned against this codebase unless a new, concrete need arises.
 
 ## Reproducible Smoke Results
 
