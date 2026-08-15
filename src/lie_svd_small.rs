@@ -209,7 +209,7 @@ fn repair_left_basis_from_right(
 
 /// Classical cyclic Jacobi eigendecomposition of a symmetric `n×n` matrix.
 /// Returns `(V, eigenvalues)` sorted descending, with `VᵗPV = diag(eig)`.
-fn eigh_jacobi_full(p: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
+pub(crate) fn eigh_jacobi_full(p: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
     let n = p.nrows();
     let mut a = p.clone();
     let mut v = Array2::<f64>::eye(n);

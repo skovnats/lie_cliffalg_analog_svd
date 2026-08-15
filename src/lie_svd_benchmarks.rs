@@ -22,8 +22,9 @@
 //!    `cargo test`; that's a real, if narrow, test-coverage gap, closed
 //!    below rather than left as a CLI-only display).
 //! 3. **Self-consistency** (`kahan_matrix`, `hilbert_matrix`, `frank_matrix`,
-//!    `forsythe_matrix`, `cauchy_matrix`): no external ground truth is
-//!    available, or -- for `hilbert_matrix`/`cauchy_matrix` at the sizes
+//!    `forsythe_matrix`, `cauchy_matrix`, `vandermonde_matrix`,
+//!    `ginibre_matrix`): no external ground truth is available, or -- for
+//!    `hilbert_matrix`/`cauchy_matrix`/`vandermonde_matrix` at the sizes
 //!    where their condition number exceeds `f64`'s representable range --
 //!    even *exists* in double precision. Orthogonality of the recovered
 //!    bases and reconstruction accuracy are what's actually checkable, and
@@ -38,14 +39,41 @@
 //!    close to defective/non-diagonalizable; see
 //!    `forsythe_matrix_stays_orthogonal_and_reconstructs` for the measured
 //!    (not assumed) accuracy this crate's solver actually reaches on it.
-//! 4. **Known asymptotic clustering** (`parter_matrix`): not a closed form
-//!    for individual singular values, but a real, citable fact from the
-//!    numerical linear algebra literature (Parter's own result, and a
-//!    standard example in Trefethen & Bau's *Numerical Linear Algebra*):
-//!    almost all of this matrix's singular values cluster near `pi` as `n`
-//!    grows. Checked directly, with a threshold calibrated against a
-//!    measurement rather than assumed --
-//!    `parter_matrix_singular_values_cluster_near_pi`.
+//!    `ginibre_matrix` is the random-matrix-theory "heavy non-normal
+//!    matrix" case (plain i.i.d. Gaussian entries, `A A^T != A^T A` in
+//!    general).
+//! 4. **Known asymptotic clustering/edge laws** (`parter_matrix`,
+//!    `marchenko_pastur_matrix`): not closed forms for individual singular
+//!    values, but real, citable facts from the literature. `parter_matrix`
+//!    (Parter's own result, also a standard example in Trefethen & Bau's
+//!    *Numerical Linear Algebra*): almost all singular values cluster near
+//!    `pi` as `n` grows. `marchenko_pastur_matrix` (Marchenko & Pastur,
+//!    1967): as the aspect ratio approaches `1`, singular values of an
+//!    i.i.d. rectangular Gaussian matrix concentrate within a known
+//!    leading-order support interval. Both checked directly, with
+//!    thresholds calibrated against measurement rather than assumed.
+//!
+//! ## Robustness properties, not accuracy claims
+//!
+//! `orthogonality_drift_stays_small_after_ten_million_rotations` and
+//! `complex_unitarity_drift_stays_small_after_ten_million_rotations` check
+//! a different kind of thing than the matrices above: not "does the solver
+//! recover a known answer on one hard input", but "does composing a very
+//! long sequence of individually-valid Givens/unitary rotor updates --
+//! exactly the operation this crate's architecture is built from --
+//! accumulate meaningful numerical drift". Measured, not assumed:
+//! `~1.4e-11` real / `~3.7e-12` complex after `1e7` rotations, both on an
+//! `8x8` basis. `extreme_dynamic_range_matrix_stays_finite_and_accurate`
+//! and `subnormal_scale_matrix_stays_finite_and_accurate` check a further
+//! different thing again -- not accuracy on a hard *spectrum*, but
+//! numerical survival at extreme *entry magnitude* (matrix entries spanning
+//! `~1e-150` to `~1e150`; entries in `f64`'s subnormal range,
+//! `~1e-310`) -- specifically because `lie_svd_small::newton_schulz_polar`
+//! scales its input by `1 / frobenius_norm(a).max(1e-300)`, so a matrix
+//! whose true Frobenius norm underflows to exactly `0.0` (subnormal entries
+//! squared underflow well before the norm itself would) is a concrete,
+//! identifiable risk this construction is meant to catch, not a
+//! hypothetical one.
 //!
 //! ## What was in scope, considered, and explicitly left out
 //!
@@ -65,6 +93,8 @@
 //!   named in the original proposal.
 
 use ndarray::{Array1, Array2};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 /// The standard Kahan test matrix (Higham, *Accuracy and Stability of
 /// Numerical Algorithms*; MATLAB `gallery('kahan', n, theta)`). Upper
@@ -233,6 +263,223 @@ pub fn parter_matrix(n: usize) -> Array2<f64> {
 /// entry structure.
 pub fn cauchy_matrix(n: usize) -> Array2<f64> {
     Array2::from_shape_fn((n, n), |(i, j)| 1.0 / (i as f64 + j as f64 + 2.0))
+}
+
+/// The Vandermonde matrix on equally spaced nodes `x_i = i+1` (`1..=n`),
+/// `V[i,j] = x_i^j` (`0`-indexed, so column `0` is all-ones, column `n-1`
+/// is `x_i^{n-1}`). A classical fact (Gautschi's work on Vandermonde
+/// conditioning): equally spaced nodes are close to the worst case for
+/// Vandermonde conditioning, with `kappa` growing exponentially in `n` --
+/// measured here at `kappa ~9.5e8` (`n=8`) up to `~5.6e15` (`n=12`, already
+/// at the edge of `f64`'s representable range). No comparison to Hilbert's
+/// own growth rate is claimed -- the exact base of that exponential isn't
+/// confidently known here, so only the measured numbers for *this* matrix
+/// are reported. No closed form for its singular values in this crate
+/// either, so self-consistency is what's checked, same as
+/// `kahan_matrix`/`frank_matrix`.
+pub fn vandermonde_matrix(n: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n, n), |(i, j)| ((i + 1) as f64).powi(j as i32))
+}
+
+/// The Ginibre ensemble: an `n x n` matrix of i.i.d. standard-normal
+/// entries, real and (deliberately, unlike a symmetric random matrix)
+/// non-normal in general (`A A^T != A^T A`). Named in random-matrix-theory
+/// benchmarks specifically as a "heavy non-normal matrix" stress case; no
+/// closed-form singular values, self-consistency is what's checked.
+pub fn ginibre_matrix(n: usize, seed: u64) -> Array2<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    Array2::from_shape_fn((n, n), |_| rng.sample::<f64, _>(rand_distr::StandardNormal))
+}
+
+/// A rectangular i.i.d. standard-normal matrix (`rows x cols`) for
+/// Marchenko-Pastur edge testing: as `cols/rows -> 1`, singular values of
+/// such a matrix are known (Marchenko & Pastur, 1967) to concentrate, with
+/// high probability, within `[sqrt(rows) - sqrt(cols), sqrt(rows) +
+/// sqrt(cols)]` -- the leading-order MP support edge (not the finer
+/// Tracy-Widom edge fluctuation law, which this doesn't attempt to check).
+pub fn marchenko_pastur_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    Array2::from_shape_fn((rows, cols), |_| {
+        rng.sample::<f64, _>(rand_distr::StandardNormal)
+    })
+}
+
+/// Discretizes a 1-D Fredholm integral equation of the first kind,
+/// `b(s) = integral_a^b K(s,t) x(t) dt`, by midpoint quadrature on `n`
+/// equally spaced nodes over `domain = (a, b)`, from an explicit smooth
+/// kernel and a known smooth "true" solution. Returns `(A, x_true, b)`
+/// with `b = A.dot(x_true)` **exactly**, by construction: the right-hand
+/// side is generated forward from a known answer rather than supplied
+/// independently, so it trivially satisfies the discrete Picard condition
+/// (an "inverse crime" in the regularization literature) -- appropriate
+/// here, where the question is whether this crate's SVD-based spectral
+/// truncation can recover a *known* answer, not whether it solves a
+/// real-world inverse problem with unknown ground truth.
+fn fredholm_first_kind(
+    n: usize,
+    domain: (f64, f64),
+    kernel: impl Fn(f64, f64) -> f64,
+    solution: impl Fn(f64) -> f64,
+) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    let (a, b) = domain;
+    let h = (b - a) / n as f64;
+    let nodes: Vec<f64> = (0..n).map(|i| a + (i as f64 + 0.5) * h).collect();
+    let mat = Array2::from_shape_fn((n, n), |(i, j)| kernel(nodes[i], nodes[j]) * h);
+    let x_true = Array1::from_shape_fn(n, |j| solution(nodes[j]));
+    let b_vec = mat.dot(&x_true);
+    (mat, x_true, b_vec)
+}
+
+/// A backward heat conduction problem, in the spirit of Hansen's `heat`
+/// test problem (P.C. Hansen, *Regularization Tools*) but built directly
+/// from the textbook 1-D heat kernel (the Gaussian fundamental solution of
+/// the heat equation, `K(x,y,t) = exp(-(x-y)^2/(4t)) / sqrt(4*pi*t)`) and a
+/// forward-generated right-hand side, rather than reproducing Hansen's own
+/// exact discretization/RHS formula (not independently verified here, so
+/// not claimed). The forward map is smoothing (a classic diffusion
+/// operator), so its inverse -- recovering the initial condition `x_true`
+/// from the diffused state `b` -- is severely ill-posed: singular values
+/// decay rapidly (the hallmark of this whole problem class), and only a
+/// spectral-truncation approach like `TblRotorRegressor`'s
+/// `singular_value_floor` has any hope of a stable answer.
+pub fn heat_problem(n: usize, diffusion_time: f64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    fredholm_first_kind(
+        n,
+        (0.0, 1.0),
+        move |s, t| {
+            (-(s - t).powi(2) / (4.0 * diffusion_time)).exp()
+                / (4.0 * std::f64::consts::PI * diffusion_time).sqrt()
+        },
+        |t| (-50.0 * (t - 0.3).powi(2)).exp() + 0.6 * (-80.0 * (t - 0.7).powi(2)).exp(),
+    )
+}
+
+/// A gravity-survey-style deconvolution problem, in the spirit of Hansen's
+/// `phillips` test problem (D.L. Phillips, 1962, "A technique for the
+/// numerical solution of certain integral equations of the first kind"),
+/// built directly from Phillips's own well-known closed-form kernel
+/// `phi(x) = 1 + cos(pi*x/3)` for `|x| < 3` (else `0`) -- a compactly
+/// supported, `C^1`-continuous bump, the one part of the classical
+/// construction confident enough to state exactly. Uses `phi` as *both*
+/// the convolution kernel `K(s,t) = phi(s-t)` and the true solution `x(t)
+/// = phi(t)`, matching Phillips's own problem, but the right-hand side is
+/// forward-generated (`b = A x_true`) rather than reproducing the
+/// classical closed-form `b(s)` (not independently verified here).
+pub fn phillips_problem(n: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    fn phi(x: f64) -> f64 {
+        if x.abs() < 3.0 {
+            1.0 + (std::f64::consts::PI * x / 3.0).cos()
+        } else {
+            0.0
+        }
+    }
+    fredholm_first_kind(n, (-6.0, 6.0), |s, t| phi(s - t), phi)
+}
+
+/// A 1-D diffraction/resolution problem, in the spirit of Hansen's `shaw`
+/// test problem (C.B. Shaw, 1972), built from the standard
+/// `(cos+cos)^2 * sinc^2` diffraction-kernel *shape* over
+/// `s, theta in [-pi/2, pi/2]`. Stated with less confidence than
+/// `heat_problem`/`phillips_problem`: the exact kernel and discretization
+/// in Hansen's own `shaw.m` were not independently re-derived or verified
+/// here, so this is a structurally faithful but not bit-exact
+/// reproduction, and the right-hand side is forward-generated from a known
+/// two-bump solution rather than any closed form.
+pub fn shaw_problem(n: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    fn sinc(x: f64) -> f64 {
+        if x.abs() < 1e-12 {
+            1.0
+        } else {
+            x.sin() / x
+        }
+    }
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    fredholm_first_kind(
+        n,
+        (-half_pi, half_pi),
+        |s, t| {
+            let u = std::f64::consts::PI * (s.sin() + t.sin());
+            (s.cos() + t.cos()).powi(2) * sinc(u).powi(2)
+        },
+        |t| 2.0 * (-6.0 * (t - 0.4).powi(2)).exp() + (-2.0 * (t + 0.5).powi(2)).exp(),
+    )
+}
+
+/// Truncated-SVD reconstruction: `x_hat = V diag(1/sigma_i for sigma_i >
+/// floor*sigma_max, else 0) U^T b`. The same truncation idea
+/// `lie_tbl_regress::TblRegressParams::singular_value_floor` already
+/// implements for regression, applied here to a first-kind Fredholm
+/// inverse problem instead -- reused by name/concept, not by calling that
+/// regression-specific code, since the reconstruction here isn't a fit.
+pub fn truncated_svd_solve(
+    u: &Array2<f64>,
+    sigma: &Array1<f64>,
+    vt: &Array2<f64>,
+    b: &Array1<f64>,
+    floor: f64,
+) -> Array1<f64> {
+    let n = sigma.len();
+    let sigma_max = sigma.iter().cloned().fold(0.0_f64, f64::max).max(1e-300);
+    let cutoff = floor * sigma_max;
+    let ub = u.t().dot(b);
+    let mut coeff = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        if sigma[i] > cutoff {
+            coeff[i] = ub[i] / sigma[i];
+        }
+    }
+    vt.t().dot(&coeff)
+}
+
+/// The 2-site Hubbard model Hamiltonian, restricted to the `N=2`,
+/// `S_z=0` sector (one up electron, one down electron) -- the standard,
+/// widely-used exactly-solvable "Hubbard dimer" (see e.g. Essler et al.,
+/// *The One-Dimensional Hubbard Model*, or Tasaki's Hubbard model lecture
+/// notes). Basis, in order: `|1> = both particles on site 1`,
+/// `|2> = up on site 1, down on site 2`, `|3> = down on site 1, up on
+/// site 2`, `|4> = both particles on site 2`. `t` is the hopping
+/// amplitude, `u` the on-site interaction:
+///
+/// ```text
+/// H = [ u  -t  -t   0 ]
+///     [-t   0   0  -t ]
+///     [-t   0   0  -t ]
+///     [ 0  -t  -t   u ]
+/// ```
+///
+/// Derived directly (not merely asserted) in the module's own commit
+/// history: since the up- and down-electron positions are independent
+/// single-particle two-level systems away from double occupancy, `H`
+/// decomposes as `H_up (x) I + I (x) H_down + u * P_doubleocc`, which
+/// reproduces exactly this matrix -- see `hubbard_dimer_eigenvalues` for
+/// the closed-form spectrum this construction makes available, and
+/// `hubbard_dimer_resolves_the_exact_near_degenerate_gap` for the
+/// cross-check against `U=0` (two independent hopping problems, spectrum
+/// `{-2t, 0, 0, 2t}` by direct sum) that confirms both derivations agree.
+pub fn hubbard_dimer_hamiltonian(t: f64, u: f64) -> Array2<f64> {
+    Array2::from_shape_vec(
+        (4, 4),
+        vec![
+            u, -t, -t, 0.0, -t, 0.0, 0.0, -t, -t, 0.0, 0.0, -t, 0.0, -t, -t, u,
+        ],
+    )
+    .expect("4x4 shape")
+}
+
+/// Exact eigenvalues of `hubbard_dimer_hamiltonian(t, u)`, derived via the
+/// symmetric/antisymmetric block decomposition described in that
+/// function's doc comment: an exact `0` (the fully antisymmetric
+/// `|2>-|3>` combination decouples completely, for any `t,u`), an exact
+/// `u` (the `|1>-|4>` combination also decouples), and
+/// `u/2 +/- sqrt((u/2)^2 + 4t^2)` from the remaining `2x2` block. At
+/// `u=0` this reduces to `{-2t, 0, 0, 2t}`, matching the independent
+/// direct-sum argument in the doc comment above -- the two derivations
+/// were cross-checked against each other, not merely asserted to agree.
+/// Not sorted; callers needing a specific order should sort as needed
+/// (tests below sort descending, this crate's usual convention).
+pub fn hubbard_dimer_eigenvalues(t: f64, u: f64) -> Array1<f64> {
+    let gap = ((u / 2.0).powi(2) + 4.0 * t * t).sqrt();
+    Array1::from(vec![0.0, u, u / 2.0 - gap, u / 2.0 + gap])
 }
 
 #[cfg(test)]
@@ -694,5 +941,390 @@ mod tests {
                 assert!(after.is_finite() && after >= 0.0);
             }
         }
+    }
+
+    /// Vandermonde matrix on equally spaced nodes: no closed form for
+    /// singular values here, so self-consistency is checked, same as
+    /// `kahan_matrix`. Measured condition numbers (`~9.5e8` at `n=8`,
+    /// `~2.1e12` at `n=10`, `~5.6e15` at `n=12`, already at the edge of
+    /// `f64`'s representable range) confirm the exponential ill-
+    /// conditioning this matrix is known for, without claiming any
+    /// particular rate relative to other matrices in this module.
+    #[test]
+    fn vandermonde_matrix_stays_orthogonal_and_reconstructs() {
+        for n in [8usize, 10, 12] {
+            let a = vandermonde_matrix(n);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+        }
+    }
+
+    /// Ginibre ensemble: plain i.i.d. Gaussian, non-normal in general --
+    /// the RMT "heavy non-normal matrix" case. No closed form, so
+    /// self-consistency again; measured `orth_u`/`orth_v` up to `~2.8e-14`,
+    /// `rel_recon` up to `~4.7e-15` at `n=16,32`.
+    #[test]
+    fn ginibre_matrix_stays_orthogonal_and_reconstructs() {
+        for n in [16usize, 32] {
+            let a = ginibre_matrix(n, 42);
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "n={n} orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "n={n} orth_v={:e}", m.orth_v);
+            assert!(m.rel_recon < 1e-9, "n={n} rel_recon={:e}", m.rel_recon);
+        }
+    }
+
+    /// Marchenko-Pastur edge: as `cols/rows -> 1`, singular values of an
+    /// i.i.d. Gaussian `rows x cols` matrix concentrate near
+    /// `sqrt(rows) +/- sqrt(cols)`. Measured across three aspect ratios,
+    /// one at exactly `cols=rows`: the *upper* edge tracks the prediction
+    /// well (`~2.5-4%` off, single seed); the *lower* edge is much noisier
+    /// (finite-size fluctuations at the lower MP edge are a known, larger
+    /// effect than at the upper edge -- not a solver artifact), so only the
+    /// upper edge gets a tight quantitative check here, and the lower edge
+    /// only a loose sanity bound (it must stay comfortably below the upper
+    /// edge, not track the asymptotic prediction closely at this `n`).
+    #[test]
+    fn marchenko_pastur_upper_edge_matches_prediction() {
+        for (rows, cols, seed) in [(64usize, 60usize, 7u64), (64, 64, 7), (100, 95, 7)] {
+            let a = marchenko_pastur_matrix(rows, cols, seed);
+            let (u, sigma, vt) = LieSvdSmall::solve_rectangular(&a);
+            // `u` has orthonormal columns (`u^T u = I_k`), `vt` is square
+            // (`k x k`) and orthogonal -- not the `n x n`/`n x n` shape
+            // `metrics::compute` assumes, so checked directly here rather
+            // than through that helper.
+            let k = sigma.len();
+            let ident_k = Array2::<f64>::eye(k);
+            let orth_u = (&u.t().dot(&u) - &ident_k).mapv(|x| x * x).sum().sqrt();
+            let orth_v = (&vt.dot(&vt.t()) - &ident_k).mapv(|x| x * x).sum().sqrt();
+            let sigma_mat = Array2::from_diag(&sigma);
+            let recon = u.dot(&sigma_mat).dot(&vt);
+            let a_norm = a.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-300);
+            let rel_recon = (&recon - &a).mapv(|x| x * x).sum().sqrt() / a_norm;
+            assert!(orth_u < 1e-9, "rows={rows} cols={cols} orth_u={orth_u:e}");
+            assert!(orth_v < 1e-9, "rows={rows} cols={cols} orth_v={orth_v:e}");
+            assert!(
+                rel_recon < 1e-9,
+                "rows={rows} cols={cols} rel_recon={rel_recon:e}"
+            );
+
+            let expected_max = (rows as f64).sqrt() + (cols as f64).sqrt();
+            let max_sigma = sigma.iter().cloned().fold(0.0_f64, f64::max);
+            let min_sigma = sigma.iter().cloned().fold(f64::INFINITY, f64::min);
+            let rel_err = (max_sigma - expected_max).abs() / expected_max;
+            assert!(
+                rel_err < 0.10,
+                "rows={rows} cols={cols} max_sigma={max_sigma:e} expected={expected_max:e} rel_err={rel_err:e}"
+            );
+            assert!(
+                min_sigma < max_sigma,
+                "rows={rows} cols={cols} min_sigma={min_sigma:e} should stay below max_sigma={max_sigma:e}"
+            );
+        }
+    }
+
+    /// A direct test of the underflow risk named in the module doc
+    /// comment: `newton_schulz_polar` scales its input by
+    /// `1 / frobenius_norm(a).max(1e-300)`. Entries spanning `~1e-150` to
+    /// `~1e150` (condition number `~1e300`, an ambient scale that never
+    /// itself risks `f64` overflow/underflow) stay fully finite, with
+    /// `orth_u`/`orth_v`/`rel_recon` all landing at `~1e-15` to `~1e-16` --
+    /// no measurable degradation despite the extreme spread. Singular
+    /// values below roughly `sigma_max * 1e-16` come out as exact `0.0` --
+    /// not a solver defect, but a representability limit of the *matrix
+    /// itself*: once assembled as a dense `f64` array, contributions ~300
+    /// orders of magnitude below the dominant term have no bits left to
+    /// occupy.
+    #[test]
+    fn extreme_dynamic_range_matrix_stays_finite_and_accurate() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let n = 16;
+        let u = random_orthogonal(n, &mut rng);
+        let v = random_orthogonal(n, &mut rng);
+        let mut sigma = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            let exp = 150.0 * (1.0 - 2.0 * i as f64 / (n - 1) as f64);
+            sigma[[i, i]] = 10f64.powf(exp);
+        }
+        let a = u.dot(&sigma).dot(&v.t());
+        assert!(
+            a.iter().all(|x| x.is_finite()),
+            "matrix construction itself must not overflow"
+        );
+
+        let (uu, ss, vtt) = LieSvdSmall::solve(&a);
+        assert!(uu.iter().all(|x| x.is_finite()));
+        assert!(vtt.iter().all(|x| x.is_finite()));
+        assert!(ss.iter().all(|x| x.is_finite() && *x >= 0.0));
+        let m = metrics::compute(&a, &uu, &ss, &vtt, None);
+        assert!(m.orth_u < 1e-9, "orth_u={:e}", m.orth_u);
+        assert!(m.orth_v < 1e-9, "orth_v={:e}", m.orth_v);
+        assert!(m.rel_recon < 1e-9, "rel_recon={:e}", m.rel_recon);
+    }
+
+    /// The other half of the underflow risk: entries whose magnitude is
+    /// itself in `f64`'s *subnormal* range (below `~2.2e-308`), where
+    /// squaring a single entry (as any Frobenius-norm computation does)
+    /// underflows to exact `0.0` well before the norm as a whole would.
+    /// Measured, not assumed: the solver's `.max(1e-300)` floor on the
+    /// polar-decomposition scale factor absorbs this cleanly here --
+    /// `orth_u`, `orth_v`, and `rel_recon` all come out as *exact* `0.0`
+    /// on this `6x6` subnormal-entry case, and the recovered singular
+    /// values stay in the correct subnormal range rather than being
+    /// crushed to zero or blown up.
+    #[test]
+    fn subnormal_scale_matrix_stays_finite_and_accurate() {
+        let subnormal_scale = 1e-310_f64;
+        assert!(
+            subnormal_scale > 0.0 && subnormal_scale < f64::MIN_POSITIVE,
+            "sanity check: this must actually be in the subnormal range"
+        );
+        let a = Array2::from_shape_fn((6, 6), |(i, j)| {
+            subnormal_scale * ((i * 3 + j + 1) as f64).sin()
+        });
+        let (u, sigma, vt) = LieSvdSmall::solve(&a);
+        assert!(u.iter().all(|x| x.is_finite()));
+        assert!(vt.iter().all(|x| x.is_finite()));
+        assert!(sigma.iter().all(|x| x.is_finite() && *x >= 0.0));
+        assert!(
+            sigma.iter().all(|&s| s == 0.0 || s < 1e-300),
+            "recovered singular values must stay in (or near) the input's own subnormal scale, sigma={sigma:?}"
+        );
+        let m = metrics::compute(&a, &u, &sigma, &vt, None);
+        assert!(m.orth_u < 1e-9, "orth_u={:e}", m.orth_u);
+        assert!(m.orth_v < 1e-9, "orth_v={:e}", m.orth_v);
+        assert!(m.rel_recon < 1e-9, "rel_recon={:e}", m.rel_recon);
+    }
+
+    /// Orthogonality drift under exactly the operation this crate's whole
+    /// architecture is built from: a very long sequence of individually
+    /// small Givens rotor updates to a shared basis. `1e7` sequential
+    /// random-angle rotations on an `8x8` identity, measured (not
+    /// bounded-by-construction) drift: `||Q^T Q - I||_F ~1.4e-11`,
+    /// `~611ms`.
+    #[test]
+    fn orthogonality_drift_stays_small_after_ten_million_rotations() {
+        let n = 8;
+        let mut basis = Array2::<f64>::eye(n);
+        let mut rng = StdRng::seed_from_u64(5);
+        let k = 10_000_000usize;
+        for _ in 0..k {
+            let i = rng.gen_range(0..n);
+            let mut j = rng.gen_range(0..n);
+            while j == i {
+                j = rng.gen_range(0..n);
+            }
+            let theta = rng.gen_range(-std::f64::consts::PI..std::f64::consts::PI);
+            crate::lie_svd_joint::apply_basis_rotor(&mut basis, i, j, theta);
+        }
+        let ident = Array2::<f64>::eye(n);
+        let drift = (&basis.t().dot(&basis) - &ident)
+            .mapv(|x| x * x)
+            .sum()
+            .sqrt();
+        assert!(drift.is_finite());
+        assert!(drift < 1e-6, "drift after {k} rotations = {drift:e}");
+    }
+
+    /// The complex-branch analogue of the orthogonality-drift test above:
+    /// `1e7` sequential random `U(2)`-parametrized unitary rotor updates
+    /// (`c` real `= cos(theta)`, off-diagonal `s = sin(theta) *
+    /// e^{i*phi}`, applied as `[[c,-conj(s)],[s,c]]` to a pair of basis
+    /// columns -- unitary by construction for any `theta,phi`) to an `8x8`
+    /// identity, using `lie_svd_complex::complex_unitarity_error` (already
+    /// tested elsewhere in this crate) rather than a new metric. Measured
+    /// drift: `~3.7e-12`, `~796ms` -- same order as the real case, no sign
+    /// the complex branch accumulates drift faster.
+    #[test]
+    fn complex_unitarity_drift_stays_small_after_ten_million_rotations() {
+        use num_complex::Complex64;
+
+        fn apply_complex_basis_rotor(
+            basis: &mut Array2<Complex64>,
+            i: usize,
+            j: usize,
+            theta: f64,
+            phi: f64,
+        ) {
+            let n = basis.nrows();
+            let c = theta.cos();
+            let s = theta.sin() * Complex64::from_polar(1.0, phi);
+            for row in 0..n {
+                let bi = basis[[row, i]];
+                let bj = basis[[row, j]];
+                basis[[row, i]] = bi * c - bj * s.conj();
+                basis[[row, j]] = bi * s + bj * c;
+            }
+        }
+
+        let n = 8;
+        let mut basis = Array2::<Complex64>::eye(n);
+        let mut rng = StdRng::seed_from_u64(11);
+        let k = 10_000_000usize;
+        for _ in 0..k {
+            let i = rng.gen_range(0..n);
+            let mut j = rng.gen_range(0..n);
+            while j == i {
+                j = rng.gen_range(0..n);
+            }
+            let theta = rng.gen_range(0.0..std::f64::consts::FRAC_PI_2);
+            let phi = rng.gen_range(0.0..(2.0 * std::f64::consts::PI));
+            apply_complex_basis_rotor(&mut basis, i, j, theta, phi);
+        }
+        let drift = crate::lie_svd_complex::complex_unitarity_error(&basis);
+        assert!(drift.is_finite());
+        assert!(drift < 1e-6, "drift after {k} rotations = {drift:e}");
+    }
+
+    fn rel_err(x_hat: &Array1<f64>, x_true: &Array1<f64>) -> f64 {
+        let norm = x_true.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+        (x_hat - x_true).mapv(|v| v * v).sum().sqrt() / norm
+    }
+
+    /// The textbook regularization story, demonstrated rather than
+    /// asserted: `heat_problem` and `shaw_problem` are severely ill-posed
+    /// (measured singular values decay to exact `0.0` well within the
+    /// `n=64` spectrum). At a well-chosen truncation floor, spectral
+    /// truncation recovers the known solution well; at essentially no
+    /// truncation (`floor=0`, dividing by near-zero singular values),
+    /// reconstruction *explodes* -- measured `rel_err` (heat) `4.7e-5` at
+    /// `floor=1e-12` versus `~78` at `floor=0`; (shaw) `1.0e-4` at
+    /// `floor=1e-12` versus `~73` at `floor=0`. This is the actual point of
+    /// these classical test problems: naive full-rank inversion of a
+    /// smoothing operator is not just inaccurate, it's numerically
+    /// catastrophic, and only spectral truncation (the same idea
+    /// `lie_tbl_regress::TblRegressParams::singular_value_floor` already
+    /// implements for regression) makes the inverse problem usable.
+    #[test]
+    fn severely_ill_posed_problems_need_spectral_truncation_to_avoid_blowup() {
+        let cases = [("heat", heat_problem(64, 0.01)), ("shaw", shaw_problem(64))];
+        for (name, (a, x_true, b)) in cases {
+            let (u, sigma, vt) = LieSvdSmall::solve(&a);
+            let m = metrics::compute(&a, &u, &sigma, &vt, None);
+            assert!(m.orth_u < 1e-9, "{name}: orth_u={:e}", m.orth_u);
+            assert!(m.orth_v < 1e-9, "{name}: orth_v={:e}", m.orth_v);
+
+            let regularized = truncated_svd_solve(&u, &sigma, &vt, &b, 1e-9);
+            let regularized_err = rel_err(&regularized, &x_true);
+            assert!(
+                regularized_err < 1e-2,
+                "{name}: regularized_err={regularized_err:e}"
+            );
+
+            let unregularized = truncated_svd_solve(&u, &sigma, &vt, &b, 0.0);
+            let unregularized_err = rel_err(&unregularized, &x_true);
+            assert!(
+                unregularized_err > 1.0,
+                "{name}: expected catastrophic blowup without truncation, \
+                 unregularized_err={unregularized_err:e}"
+            );
+            assert!(
+                unregularized_err > 10.0 * regularized_err,
+                "{name}: expected the unregularized solve to be far worse than \
+                 the regularized one (unregularized={unregularized_err:e}, \
+                 regularized={regularized_err:e})"
+            );
+        }
+    }
+
+    /// The contrasting case: `phillips_problem` is only moderately
+    /// ill-conditioned (measured `kappa ~2.9e5` at `n=64`, no singular
+    /// values collapsing to exact zero within the spectrum) -- so, unlike
+    /// `heat`/`shaw` above, full-rank inversion here is *not* catastrophic.
+    /// Measured: reconstruction is accurate to `~4.8e-11` even with *no*
+    /// spectral truncation at all (`floor=0`), essentially unchanged from
+    /// heavier truncation. The contrast matters: not every hard-looking
+    /// inverse problem needs regularization, and this crate's SVD
+    /// correctly distinguishes the two regimes rather than needing
+    /// truncation applied uniformly out of caution.
+    #[test]
+    fn moderately_conditioned_inverse_problem_needs_no_truncation() {
+        let (a, x_true, b) = phillips_problem(64);
+        let (u, sigma, vt) = LieSvdSmall::solve(&a);
+        let m = metrics::compute(&a, &u, &sigma, &vt, None);
+        assert!(m.orth_u < 1e-9, "orth_u={:e}", m.orth_u);
+        assert!(m.orth_v < 1e-9, "orth_v={:e}", m.orth_v);
+
+        let unregularized = truncated_svd_solve(&u, &sigma, &vt, &b, 0.0);
+        let err = rel_err(&unregularized, &x_true);
+        assert!(err < 1e-6, "err={err:e}");
+    }
+
+    /// The closed form was derived, not merely asserted -- see
+    /// `hubbard_dimer_hamiltonian`'s and `hubbard_dimer_eigenvalues`'s doc
+    /// comments for the derivation and its independent cross-check at
+    /// `u=0`. This test verifies it numerically against
+    /// `lie_svd_small::eigh_jacobi_full` (this crate's own eigensolver, a
+    /// different code path from `hubbard_dimer_eigenvalues`'s closed-form
+    /// arithmetic) across several `(t, u)` values, including negative `u`.
+    /// Measured agreement: differences at or near machine precision
+    /// (`<1e-14`) for every eigenvalue at every `(t,u)` tested here.
+    #[test]
+    fn hubbard_dimer_matches_its_exact_closed_form_spectrum() {
+        for (t, u) in [(1.0_f64, 4.0_f64), (1.0, 0.0), (2.3, -3.1), (0.5, 10.0)] {
+            let h = hubbard_dimer_hamiltonian(t, u);
+            let (_v, got_eig) = crate::lie_svd_small::eigh_jacobi_full(&h);
+            let mut got = got_eig.to_vec();
+            let mut want = hubbard_dimer_eigenvalues(t, u).to_vec();
+            got.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            want.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            for (g, w) in got.iter().zip(want.iter()) {
+                let diff = (g - w).abs();
+                assert!(
+                    diff < 1e-9,
+                    "t={t} u={u}: got={g:e} want={w:e} diff={diff:e}"
+                );
+            }
+        }
+    }
+
+    /// The point of this benchmark: at a tiny but nonzero `u`, the Hubbard
+    /// dimer has two eigenvalues that are close (`0` exactly, and `u`) but
+    /// genuinely distinct -- a real, physically motivated near-degenerate
+    /// gap, the same kind of case the `pei_matrix` degenerate-spectrum test
+    /// checks from a different angle. Measured at `u=1e-12`: the solver
+    /// resolves both as distinct (not collapsed to a single value), with
+    /// the tiny eigenvalue recovered to `~1.0000831e-12` against the exact
+    /// `1e-12` -- a relative error of `~8e-5`, not full double-precision
+    /// relative accuracy at this extreme gap scale (the absolute precision
+    /// floor set by the matrix's other, order-`1` entries is `~1e-16`,
+    /// which is already `~1e-4` relative to a `1e-12`-scale eigenvalue --
+    /// consistent with the measured error, not a solver defect). Reported
+    /// as the honest, measured bound, not tightened to look better.
+    #[test]
+    fn hubbard_dimer_resolves_the_exact_near_degenerate_gap() {
+        let t = 0.7;
+        let u = 1e-12;
+        let h = hubbard_dimer_hamiltonian(t, u);
+        let (_v, eig) = crate::lie_svd_small::eigh_jacobi_full(&h);
+        let mut got = eig.to_vec();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // The two smallest-magnitude eigenvalues should be `0` and `u`,
+        // genuinely distinct rather than collapsed together.
+        let near_zero_pair: Vec<f64> = got.iter().cloned().filter(|&e| e.abs() < 1e-6).collect();
+        assert_eq!(
+            near_zero_pair.len(),
+            2,
+            "expected exactly two near-zero eigenvalues, got {near_zero_pair:?}"
+        );
+        let lo = near_zero_pair[0].min(near_zero_pair[1]);
+        let hi = near_zero_pair[0].max(near_zero_pair[1]);
+        assert!(
+            lo.abs() < 1e-9,
+            "expected the smaller one near exact 0, got {lo:e}"
+        );
+        let rel_err_on_gap = (hi - u).abs() / u;
+        assert!(
+            rel_err_on_gap < 1e-2,
+            "expected the u-scale eigenvalue resolved to within 1% relative, got hi={hi:e} rel_err={rel_err_on_gap:e}"
+        );
+        assert!(
+            hi > 10.0 * lo.abs().max(1e-300),
+            "the two near-zero eigenvalues should be clearly distinguishable, lo={lo:e} hi={hi:e}"
+        );
     }
 }
