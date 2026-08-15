@@ -1,5 +1,307 @@
 # Release Notes
 
+## 0.41.0
+
+Sixth and final cycle of the robustness/frontier-benchmark program: an
+isolated LAPACK/MPFR ground-truth comparison harness
+(`compare/`), closing the program's last open item without touching the
+main crate's own dependency tree.
+
+**Isolation, verified, not just claimed.** `compare/` is a completely
+separate Cargo package (its own `[workspace]` marker, so Cargo never merges
+it into the main crate's build; reachable only via a `path = ".."`
+dependency in one direction) with its own `Dockerfile`, whose build context
+is the repository root specifically so it can reach the main crate's source
+as a read-only reference. Confirmed directly: after building and running
+the comparison image, the main crate's own `Cargo.lock` contains zero
+references to `ndarray-linalg`, `rug`, `openblas-src`, `lapack-sys`, or
+`gmp-mpfr-sys`, and `cargo build`/`cargo test` from the main crate's own
+directory are unaffected (157/157, unchanged).
+
+**A real, non-trivial build problem, solved rather than routed around.**
+`lapack-sys` 0.14.0 has a known FFI bug on `aarch64` (ARM) Linux — a
+char-signedness mismatch (`*const u8` vs `*const i8`) between its generated
+bindings and OpenBLAS's actual C signatures, breaking the native build on
+this development machine's own architecture. Building for `linux/amd64`
+explicitly (via QEMU emulation) sidesteps it entirely; documented directly
+in `compare/README.md` rather than left as a silent "just works" claim.
+Separately, `openblas-src`'s build-dependency `openblas-build` hard-requires
+a TLS feature (`rustls` or `native-tls`) just to *compile*, even when using
+the `system` (no-download) OpenBLAS path — worked around by explicitly
+requesting `rustls` on that dependency without changing which OpenBLAS
+actually gets linked.
+
+**Findings, measured on real production LAPACK and 200-bit MPFR:**
+
+- On well-conditioned matrices (Kahan, Pei), this crate's own solver agrees
+  with LAPACK's `dgesdd` to `~1e-12`/`~1e-13` relative singular-value
+  accuracy, both near machine-precision orthogonality/reconstruction. LAPACK
+  is consistently faster (`~10-40x` in these runs) — not a surprise, and not
+  a claim this crate ever made otherwise.
+- On Hilbert and Vandermonde (condition numbers exceeding `f64`'s
+  representable range, per `0.34.0`/`0.36.0`'s own findings), this crate and
+  LAPACK **disagree substantially** on the smallest singular values
+  (`~16x` relative "disagreement" on Hilbert `n=32`) — not a bug in either
+  solver, but the expected, now externally-confirmed consequence of both
+  solvers recovering numerical noise rather than a meaningful answer past
+  that point, with no reason for two independent noise floors to agree.
+- MPFR (200-bit) vs plain `f64` on the Hilbert matrix's determinant, a
+  solver-independent representation-error measurement: `f64`'s answer is
+  already `~5.4%` off from the 200-bit reference by `n=12` — a clean,
+  absolute quantification of how much of `f64`'s Hilbert-matrix behavior is
+  representation error alone, independent of any SVD algorithm's choices.
+- The Pei matrix's exact closed-form spectrum is independently reconfirmed
+  here too: `max relative error = 1.0e-12` at `n=64`.
+
+Full numbers and reproduction instructions in `compare/README.md`.
+
+**Program summary (`0.34.0`-`0.41.0`).** Eight cycles: standard "evil
+matrix" benchmarks (`0.34.0`), the rest of the Higham set plus an Amari
+parametric grid (`0.35.0`), self-contained robustness properties —
+dynamic range, subnormals, rotor drift (`0.36.0`), classical ill-posed
+inverse problems (`0.37.0`), a from-scratch-derived quantum many-body
+benchmark (`0.38.0`), Lyapunov spectrum extraction as a new numerical
+subsystem (`0.39.0`), streaming low-rank tracking as a second new
+subsystem (`0.40.0`), and this isolated external-reference comparison
+(`0.41.0`). One scope decision made explicitly at nearly every cycle: what
+to build now, what to defer (Kuramoto-Sivashinsky, Trefethen pseudospectra,
+SuiteSparse/Cardoso datasets, Frank/Forsythe/Parter/Cauchy until `0.35.0`)
+and why, rather than silently dropping or silently overreaching.
+
+157/157 main-crate tests pass, unchanged from `0.40.0`; the comparison
+harness has no test suite of its own (a comparison tool, not a
+correctness-asserting one) but its own build was verified end to end via
+`docker build`/`docker run` on `linux/amd64`.
+
+## 0.40.0
+
+Fifth cycle of the robustness/frontier-benchmark program, and the second
+genuinely new numerical subsystem (`lie_svd_streaming`): streaming/
+incremental low-rank tracking with rank adaptation ("rank jumps"),
+processing a data stream one column at a time rather than recomputing a
+full SVD from scratch on every arrival.
+
+**Scope decision, made before writing code.** The classical reference for
+this problem is Brand's rank-1 SVD update (Brand, 2006, "Fast low-rank
+modifications of the thin singular value decomposition"), a specific
+closed-form update via a small block-matrix SVD. Reproducing that exact
+formula from memory carried the same risk category already flagged and
+avoided twice this program (`0.37.0`'s Hansen problems, similar reasoning):
+a subtly wrong sign or index that wouldn't look obviously wrong just from
+running it. Implemented instead: a simpler, lower-risk design that
+maintains an orthonormal basis `Q` plus a small "core" matrix representing
+the accumulated outer-product energy in `Q`'s current basis, re-diagonalized
+every step with this crate's own `lie_svd_small::eigh_jacobi_full`
+(already tested elsewhere, reused rather than re-derived) — extending `Q`
+by one column whenever a new column's residual (after projecting onto the
+current subspace) is large relative to its own norm, which is the rank-jump
+mechanism, and truncating the smallest-eigenvalue direction if that push
+past `max_rank`.
+
+- **Verified against a direct batch SVD, not an external reference.** When
+  `max_rank` is set at or above the stream's true rank, no energy is ever
+  discarded by truncation, so the tracker's result should exactly equal a
+  batch SVD (`LieSvdSmall::solve_rectangular`) of the same accumulated
+  data. Measured (`20`-dim ambient space, `40` streamed columns, true rank
+  `3`, two independent seeds): singular-value relative error `~1-2e-15`,
+  tracked-basis orthogonality error `~8e-15`, subspace-residual agreement
+  against the batch left singular vectors `~4-6e-15` — essentially exact.
+- **The actual point of the module.** A stream whose true rank grows
+  partway through (first half confined to a rank-2 subspace, second half
+  introducing a genuine third direction): the tracked rank grows from `2`
+  to `3` in response, and the final tracked subspace captures the new
+  third direction (residual `<1e-6`), not just the original two.
+
+157/157 tests pass (155 carried over from `0.39.0` plus 2 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
+## 0.39.0
+
+Fourth cycle of the robustness/frontier-benchmark program, and the first
+one that's a genuinely *new* numerical subsystem (`lie_svd_lyapunov`)
+rather than a benchmark of existing solvers: Lyapunov spectrum extraction
+via the standard "continuous QR" method (Benettin et al. 1980; Shimada &
+Nagashima 1979), applied to the Lorenz-96 chaotic model.
+
+**Scope decision, made before writing code.** The original proposal named
+both Lorenz-96 and the Kuramoto-Sivashinsky (KS) equation. KS is a 4th-order
+stiff nonlinear PDE requiring a proper spectral discretization and a stable
+implicit-explicit time integrator (naive explicit stepping on a 4th
+derivative is numerically unstable) — substantially more numerical-methods
+risk than this cycle's budget could verify properly. Scoped to Lorenz-96
+only (a finite-dimensional chaotic ODE system, RK4 is directly adequate);
+KS is deferred, not silently dropped.
+
+- **The method itself**: propagate the augmented `(x, Phi)` system (state
+  plus tangent frame) with this crate's own RK4 stepper, Jacobian evaluated
+  at each of the 4 RK4 stages' own intermediate state (not a single frozen
+  Jacobian per step — the standard full-accuracy version of this method).
+  Periodically QR-decompose `Phi`, replace it with the orthogonal factor,
+  accumulate `log(R_ii)` — the textbook fix for the tangent frame's
+  singular values otherwise separating exponentially and over/underflowing
+  within a handful of Lyapunov times.
+- **Verification without an external reference.** Comparing against a
+  specific published Lyapunov exponent for a specific system size would
+  mean citing a number from memory that can't be checked here — avoided,
+  the same reasoning as `0.37.0`'s Hansen problems. Instead: `lorenz96_jacobian`
+  checked directly against central finite differences of `lorenz96_rhs`
+  (`<1e-6` max difference); and a **rigorous, exactly-derivable** identity
+  for the spectrum itself — the sum of all Lyapunov exponents equals the
+  time-averaged trace of the Jacobian (a standard theorem), and for
+  Lorenz-96 specifically `trace(J(x)) = -K` *identically* for every state
+  (the only `x_i`-dependence in `dx_i/dt` is the explicit `-x_i` damping
+  term), making the target for the sum of all `K` exponents exactly `-K`,
+  not approximate. Measured at `K=10`: sum `= -9.999993`, `diff = 6.6e-6`
+  from the exact target `-10`; final tracked-frame orthogonality error
+  `5.5e-16`. The qualitative chaos indicator (at least one clearly positive
+  exponent at the standard forcing `F=8`) is also confirmed: the measured
+  spectrum has four positive exponents (`~1.18, ~0.70, ~0.065, ~0.021`).
+
+155/155 tests pass (152 carried over from `0.38.0` plus 3 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
+## 0.38.0
+
+Third cycle of the robustness/frontier-benchmark program: a quantum
+many-body benchmark with a genuine, independently-derived closed-form
+ground truth, rather than the larger, riskier full Fock-space Hubbard
+construction originally proposed.
+
+**Scope decision, made before writing code.** A full multi-site Hubbard
+model built in second-quantized Fock space carries real risk of subtle
+fermionic-sign bugs that would be hard to catch without an external
+reference to check against. Instead: the 2-site Hubbard dimer, restricted
+to the `N=2, S_z=0` sector — a small (`4x4`), standard, textbook
+exactly-solvable model, with its Hamiltonian and full closed-form spectrum
+**derived from scratch in this session** (not recalled from a possibly-
+misremembered source), via two independent arguments that were then
+cross-checked against each other: a tensor-product argument at `u=0`
+(`H = H_up ⊗ I + I ⊗ H_down`, giving `{-2t, 0, 0, 2t}`) and a full
+symmetric/antisymmetric block decomposition for general `u` (giving exact
+eigenvalues `0`, `u`, and `u/2 ± sqrt((u/2)^2 + 4t^2)`). Both derivations
+agree at `u=0`, and the general-`u` closed form was then verified
+numerically against `lie_svd_small::eigh_jacobi_full` (promoted to
+`pub(crate)` for this — a different code path from the closed-form
+arithmetic) across four `(t,u)` pairs including negative `u`: differences
+at or near machine precision (`<1e-14`) throughout.
+
+- **`hubbard_dimer_matches_its_exact_closed_form_spectrum`**: the general
+  verification above, `<1e-9` margin over the measured `<1e-14`.
+- **`hubbard_dimer_resolves_the_exact_near_degenerate_gap`**: the actual
+  point of this benchmark. At `u=1e-12`, two eigenvalues are close (`0`
+  exactly, `u`) but genuinely distinct — a real, physically motivated
+  near-degenerate gap. Measured: both resolved as distinct (not collapsed
+  together), with the tiny eigenvalue recovered to `~1.0000831e-12`
+  against the exact `1e-12` — a `~8e-5` relative error, not full
+  double-precision relative accuracy at this extreme gap scale, and
+  reported as such: the absolute-precision floor set by the matrix's other,
+  order-`1` entries is `~1e-16`, which is *already* `~1e-4` relative to a
+  `1e-12`-scale eigenvalue, consistent with what was measured rather than
+  a solver defect.
+
+152/152 tests pass (150 carried over from `0.37.0` plus 2 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
+## 0.37.0
+
+Second cycle of the robustness/frontier-benchmark program: Hansen's
+classical ill-posed inverse-problem benchmarks (`heat`, `phillips`,
+`shaw`), plus a truncated-SVD reconstruction utility to actually exercise
+them.
+
+**Scope decision, stated explicitly before implementing.** These are not
+bit-exact reproductions of Hansen's own `Regularization Tools` MATLAB
+source (`heat.m`/`phillips.m`/`shaw.m`), which wasn't available to verify
+against here. Instead, each problem is built from the part of the classical
+construction confident enough to state exactly (the textbook 1-D heat
+kernel for `heat`; Phillips's own well-known closed-form bump
+`phi(x)=1+cos(pi*x/3)` for `phillips`; the standard `(cos+cos)^2*sinc^2`
+diffraction-kernel shape for `shaw`, the one stated with the least
+confidence), with the right-hand side forward-generated (`b = A x_true`)
+from a known smooth solution rather than reproducing any memorized
+closed-form RHS — a deliberate choice to avoid asserting a formula that
+couldn't be checked, not an oversight.
+
+- **`truncated_svd_solve`**: `x_hat = V diag(1/sigma_i for sigma_i >
+  floor*sigma_max, else 0) U^T b` — the same truncation idea
+  `lie_tbl_regress::TblRegressParams::singular_value_floor` already
+  implements for regression, applied here to a genuinely different domain
+  (first-kind Fredholm inverse problems).
+- **The textbook regularization story, demonstrated, not just asserted.**
+  `heat`/`shaw` are severely ill-posed (singular values measured decaying
+  to exact `0.0` well within the `n=64` spectrum). At a well-chosen
+  truncation floor (`1e-9`), reconstruction is accurate (`heat`: `~4.7e-5`
+  at `floor=1e-12`; `shaw`: `~1.0e-4`); at essentially no truncation
+  (`floor=0`, dividing by near-zero singular values), reconstruction
+  *explodes* (`heat`: `~78x` the true solution's own norm; `shaw`: `~73x`)
+  — this is the actual point of this problem class: naive full-rank
+  inversion of a smoothing operator isn't just inaccurate, it's numerically
+  catastrophic.
+- **The contrasting case.** `phillips` is only moderately ill-conditioned
+  (`kappa~2.9e5` at `n=64`, no singular values collapsing to exact zero) —
+  reconstruction is accurate to `~4.8e-11` even with *no* truncation at
+  all, essentially unchanged from heavier truncation. Not every
+  hard-looking inverse problem needs regularization, and this crate's SVD
+  correctly distinguishes the two regimes.
+
+150/150 tests pass (148 carried over from `0.36.0` plus 2 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
+## 0.36.0
+
+First cycle of a multi-release robustness/frontier-benchmark program
+(`lie_svd_benchmarks`, continued). Scope decided explicitly before
+starting: no LAPACK/MPFR/Arb dependency added to the main crate (a
+separate, isolated comparison harness with its own Dockerfile is planned
+as its own later cycle, to keep the main crate's zero-heavy-dependency
+property intact); the "canonical symplectic drift" item was replaced with
+a *unitary* drift test, since this crate has no `Sp(2n)` structure
+anywhere to test — its complex branch is unitary (`U(n)`/`SU(n)`-like),
+which it does have.
+
+- **Vandermonde matrix** (equally spaced nodes, `x_i=i+1`): self-consistency
+  only (no closed form for its singular values here). Measured condition
+  numbers `~9.5e8` (`n=8`) to `~5.6e15` (`n=12`, at the edge of `f64`'s
+  representable range), confirming the classical exponential-ill-
+  conditioning fact — with no claim about its rate relative to Hilbert's
+  own growth, since that comparison isn't reliably known here (an earlier
+  draft of this doc comment claimed "worse than Hilbert" without having
+  actually measured it; caught and removed before merging, not after).
+- **Ginibre ensemble** (plain i.i.d. Gaussian, deliberately non-normal):
+  self-consistency, `orth_u`/`orth_v` up to `~2.8e-14`, `rel_recon` up to
+  `~4.7e-15` at `n=16,32`.
+- **Marchenko-Pastur edge**: singular values of an i.i.d. rectangular
+  Gaussian matrix concentrate near `sqrt(rows)+sqrt(cols)` as the aspect
+  ratio approaches `1` (Marchenko & Pastur, 1967). Measured across three
+  aspect ratios: the upper edge tracks the prediction to `~2.5-4%`, checked
+  tightly (`<10%`); the lower edge is known to fluctuate much more at
+  finite `n` (a real RMT fact, not a solver artifact), so only a loose
+  sanity bound is checked there.
+- **Extreme dynamic range** (`~1e-150` to `~1e150`, `kappa~1e300`): all
+  finite, `orth_u`/`orth_v`/`rel_recon` all `~1e-15` to `~1e-16` — no
+  measurable degradation from the extreme spread. Singular values below
+  `~sigma_max * 1e-16` collapse to exact `0.0`, a representability limit of
+  the assembled dense matrix itself, not a solver defect.
+- **Subnormal-scale entries** (`~1e-310`, below `f64`'s normal range
+  `~2.2e-308`): a concrete, named risk, not a hypothetical one —
+  `lie_svd_small::newton_schulz_polar` scales its input by
+  `1/frobenius_norm(a).max(1e-300)`, and squaring a subnormal entry
+  underflows to exact `0.0` well before the norm itself would. Measured:
+  the `.max(1e-300)` floor absorbs this cleanly — `orth_u`/`orth_v`/
+  `rel_recon` all come out as *exact* `0.0` on the tested `6x6` case, and
+  recovered singular values stay correctly in the subnormal range rather
+  than being crushed to zero or blown up.
+- **Orthogonality/unitarity drift under 1e7 sequential rotor updates** —
+  directly relevant since this is exactly the operation this crate's whole
+  architecture is built from. Real (Givens): `~1.4e-11` drift, `~611ms`.
+  Complex (`U(2)`-parametrized unitary rotor): `~3.7e-12` drift, `~796ms`,
+  reusing `lie_svd_complex::complex_unitarity_error` rather than a new
+  metric — no sign the complex branch accumulates drift faster than the
+  real one.
+
+148/148 tests pass (141 carried over from `0.35.0` plus 7 new), `cargo fmt
+--check` and `cargo clippy` clean.
+
 ## 0.35.0
 
 A compact stabilization cycle closing the two items `0.34.0` explicitly

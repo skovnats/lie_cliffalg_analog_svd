@@ -1,11 +1,11 @@
 [package]
 name = "lie_cliffalg_analog_svd"
-version = "0.35.0"
+version = "0.41.0"
 edition = "2021"
 authors = ["Lie/Clifford Analog SVD contributors...Dr. Artiom A. Kovnatsky++"]
 license-file = "License"
 description = "Research SVD solvers based on polar/Jacobi, Lie-Clifford dual rotors, and analog-chip rotor meshes."
-repository = "https://codeberg.org/skovnats/lie_cliffalg_analog_svd"
+repository = "https://github.com/skovnats/lie_cliffalg_analog_svd"
 readme = "README.md"
 keywords = ["svd", "linear-algebra", "clifford", "analog", "photonic"]
 categories = ["mathematics", "science"]

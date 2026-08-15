@@ -56,8 +56,127 @@ assert the comparison, not a threshold, so a reversal announces itself.
 Two preprints describe the method and its measured limits: Part I (operators)
 and Part II (tables and heterogeneous coupling). DOIs below.
 
-- **Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra)**; [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
-- **Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II)**; [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
+- Phase Algebra: Matrices as Clifford Multivector Networks & Phase-Rotor Methods for SVD and Joint Diagonalization (An Extension of Linear Algebra); [https://doi.org/10.5281/zenodo.21922112](https://doi.org/10.5281/zenodo.21922112)
+- Clifford Tabular Algebra: A Multivector Data Model for Relational Tables, Subspace-Coupled Joint Diagonalization across Heterogeneous Dimensions, and Measured Limits (A Rust Prototype, Part II); [https://doi.org/10.5281/zenodo.21932855](https://doi.org/10.5281/zenodo.21932855)
+
+## Reproduce
+
+This is the fast path to build, test, and run everything in this
+repository, both the main crate (zero heavy dependencies) and the isolated
+`compare/` harness (LAPACK + MPFR, kept structurally separate — see
+[`compare/README.md`](compare/README.md) and `ARCHITECTURE.md`'s
+`compare/` section for why). `## Install`, `## Quick Use`, `## Benchmark`,
+and `## Docker Linux Smoke Test` below go into more per-flag detail on the
+main crate specifically; this section is the one-stop version, including
+the platform/environment caveats that are easy to miss.
+
+### 0. Prerequisites
+
+- A recent stable Rust toolchain (`rustup update stable` if unsure; the
+  Docker images build against `rust:1-bookworm`, i.e. current stable).
+- Docker, only if you want the containerized builds rather than native
+  ones. On Apple Silicon / Windows, Docker Desktop is the easiest path (it
+  bundles QEMU-based emulation for the `compare/` step below); on native
+  Linux Docker Engine, cross-platform emulation is usually a one-time setup
+  (see the troubleshooting note under step 3).
+- `compare/`'s **native** (non-Docker) build additionally needs OpenBLAS,
+  LAPACK, GMP, MPFR, and MPC installed on your machine (`brew install
+  openblas gmp mpfr libmpc` on macOS, `apt install libopenblas-dev
+  liblapack-dev libgmp-dev libmpfr-dev libmpc-dev` on Debian/Ubuntu) — not
+  needed at all if you only use the Docker path for it.
+
+### 1. Main crate, native
+
+```bash
+git clone https://github.com/skovnats/lie_cliffalg_analog_svd && cd lie_cliffalg_analog_svd
+
+# Build (add RUSTFLAGS="-C target-cpu=native" for best local performance —
+# skip that flag if the binary needs to run on a *different* machine than
+# the one that built it, since "native" bakes in this CPU's instruction
+# set).
+cargo build --release
+
+# Full reproducible check: format, the whole test suite (--locked pins
+# exactly the dependency versions in the committed Cargo.lock, so this is
+# the same build everyone else gets, not whatever the latest compatible
+# versions happen to be today), then one representative benchmark run.
+cargo fmt --check
+cargo test --release --lib --locked
+cargo run --release --bin stress_cpu --locked -- 64 --analog
+```
+
+### 2. Main crate, Docker
+
+No `--platform` flag needed here — the main crate has no LAPACK/BLAS
+dependency, so it builds natively for whatever architecture Docker is
+running on (arm64 on Apple Silicon, amd64 elsewhere), and the image is
+portable either way.
+
+```bash
+docker build --no-cache -t lie_cliffalg_analog_svd .
+docker run --rm lie_cliffalg_analog_svd
+```
+
+`--no-cache` is optional but recommended for a genuine from-scratch
+reproduction (matches how every release in `RELEASE_NOTES.md` was actually
+verified) — omit it for faster iterative rebuilds. The image runs the test
+suite as a build step (so a failing test fails the `docker build` itself,
+not just a later `docker run`), then defaults to an `N=64` analog-inclusive
+stress benchmark on `docker run`; see `## Benchmark` below for other CLI
+flags to pass after the image name.
+
+### 3. `compare/`, Docker (the isolated LAPACK/MPFR harness)
+
+**This one *does* need an explicit platform flag on Apple Silicon (and any
+other non-`amd64` host):** `lapack-sys` 0.14.0 has a genuine FFI bug on
+`aarch64` (a `char`-signedness mismatch between its generated bindings and
+OpenBLAS's actual C signatures — see `ARCHITECTURE.md`) that breaks the
+native build there. Building for `linux/amd64` and letting Docker emulate
+it sidesteps this entirely.
+
+Build context must be the **repository root**, not `compare/` itself,
+since the `compare` crate reaches the main crate via a `path = ".."`
+dependency:
+
+```bash
+# from the repository root
+docker build --platform linux/amd64 -f compare/Dockerfile -t lie_svd_reference_compare .
+docker run --rm --platform linux/amd64 lie_svd_reference_compare
+```
+
+Things worth knowing before you kick this off:
+
+- **It's slow the first time.** Building OpenBLAS, LAPACK bindings, and
+  MPFR under QEMU emulation took roughly 20 minutes on the machine this was
+  developed on — that's the emulation overhead, not a hang. Cached rebuilds
+  (`docker build` without `--no-cache`, after the first successful build)
+  are much faster since only changed layers rebuild.
+- **"exec format error" on `docker run`** means your Docker installation
+  doesn't have `linux/amd64` emulation registered. On Docker Desktop
+  (Mac/Windows) this ships enabled by default; on native Linux Docker
+  Engine, register it once with
+  `docker run --privileged --rm tonistiigi/binfmt --install all`.
+- **`compare/` has no test suite of its own** — it's a comparison tool, not
+  a correctness-asserting one. Running it *is* the check; read its printed
+  output (or see `compare/README.md` for what past runs measured).
+- If you'd rather build natively instead of via Docker (e.g. on an actual
+  `x86_64` Linux machine, where the `aarch64` bug above doesn't apply),
+  install the system libraries from the Prerequisites section above, then:
+  ```bash
+  cd compare
+  cargo run --release
+  ```
+
+### 4. What you should see
+
+- Main crate: `test result: ok. 157 passed; 0 failed; ...` from the test
+  suite, and a benchmark table (columns: profile, solver, timing,
+  reconstruction/orthogonality error, allocation count) from `stress_cpu`.
+- `compare/`: a report comparing this crate's solver against LAPACK's
+  `dgesdd` on several named hard matrices, then an MPFR-vs-`f64` Hilbert-
+  matrix determinant comparison — see `compare/README.md` for the exact
+  numbers this repository's own README and `RELEASE_NOTES.md` cite as
+  "measured," so you can check your own run lands in the same range.
 
 ---
 
@@ -318,6 +437,106 @@ that were gradually made more conservative and testable:
   cells, though — reported as measured, not smoothed — not monotonically
   in `kappa`. Trefethen pseudospectra remain in the backlog. See the
   0.35.0 section below.
+- **Robustness/frontier-benchmark program, cycle 1 (`lie_svd_benchmarks`):**
+  `0.36.0` opens a multi-release program testing properties beyond "does the
+  solver recover a known spectrum": Vandermonde (equally spaced nodes,
+  self-consistency), Ginibre ensemble and the Marchenko-Pastur edge law
+  (upper edge tracks prediction to `~2.5-4%`), extreme dynamic range
+  (`~1e-150` to `~1e150`, `kappa~1e300` — no measurable degradation) and
+  subnormal-scale entries (a named, concrete underflow risk in
+  `newton_schulz_polar`'s norm-based scaling, not a hypothetical one —
+  measured, absorbed cleanly), and orthogonality/unitarity drift under `1e7`
+  sequential rotor updates (real `~1.4e-11`, complex `~3.7e-12`) — directly
+  relevant since that's the operation this crate's whole architecture is
+  built from. No LAPACK/MPFR/Arb dependency was added to the main crate; a
+  separate, isolated comparison harness with its own Dockerfile is planned
+  as a later cycle in the same program. See the 0.36.0 section below.
+- **Robustness/frontier-benchmark program, cycle 2 — ill-posed inverse
+  problems:** `0.37.0` adds Hansen-style `heat`/`phillips`/`shaw` test
+  problems (built from the classical construction's most-confidently-known
+  parts, not a bit-exact reproduction of unavailable source — stated
+  explicitly rather than silently approximated), plus `truncated_svd_solve`
+  to actually exercise them. Demonstrates, not just asserts, the textbook
+  regularization story: `heat`/`shaw` are severely ill-posed and naive
+  full-rank inversion *explodes* (`~78x`/`~73x` the true solution's norm)
+  where truncated-SVD recovers it accurately; `phillips` is only
+  moderately conditioned and needs no truncation at all (`~4.8e-11` exact).
+  See the 0.37.0 section below.
+- **Robustness/frontier-benchmark program, cycle 3 — quantum many-body:**
+  `0.38.0` uses the 2-site Hubbard dimer (`N=2, S_z=0` sector) rather than
+  a full multi-site Fock-space construction (real fermionic-sign-bug risk,
+  scoped out before writing code). Hamiltonian and full closed-form
+  spectrum derived from scratch via two independent, cross-checked
+  arguments, then verified against this crate's own eigensolver
+  (`<1e-14` agreement across four `(t,u)` pairs). The point: at `u=1e-12`,
+  two eigenvalues are close (`0`, `u`) but genuinely distinct — a real
+  physically motivated near-degenerate gap, resolved as distinct (not
+  collapsed), with the tiny eigenvalue recovered to `~8e-5` relative error
+  (limited by the matrix's own `~1e-16` absolute precision floor relative
+  to a `1e-12`-scale eigenvalue, not a solver defect). See the 0.38.0
+  section below.
+- **Robustness/frontier-benchmark program, cycle 4 — Lyapunov spectrum
+  extraction (`lie_svd_lyapunov`):** `0.39.0` is the first cycle that's a
+  genuinely *new* numerical subsystem, not a benchmark of existing solvers
+  — the standard "continuous QR" method (Benettin et al. 1980) applied to
+  the Lorenz-96 chaotic model, propagating state and tangent frame together
+  via this crate's own RK4, periodically re-orthogonalizing the frame via
+  QR and accumulating the log of `R`'s diagonal. Kuramoto-Sivashinsky (the
+  other system named in the original proposal) was scoped out before
+  writing code — a 4th-order stiff PDE needs a spectral discretization and
+  stable implicit-explicit time-stepping, more numerical-methods risk than
+  this cycle could verify properly; deferred, not silently dropped.
+  Verified without an external literature reference: the Jacobian checked
+  against finite differences, and the spectrum against a rigorous,
+  exactly-derivable identity (sum of all Lyapunov exponents = time-averaged
+  trace of the Jacobian, which for Lorenz-96 is `-K` identically for every
+  state) — measured sum `-9.999993` against the exact target `-10` at
+  `K=10`, orthogonality error `5.5e-16`. See the 0.39.0 section below.
+- **Robustness/frontier-benchmark program, cycle 5 — streaming low-rank
+  tracking (`lie_svd_streaming`):** `0.40.0` adds the second genuinely new
+  numerical subsystem: incremental subspace tracking with rank adaptation,
+  one column at a time. Rather than reproducing Brand's exact rank-1
+  SVD-update formula from memory (the same unverifiable-closed-form risk
+  flagged and avoided for `0.37.0`'s Hansen problems), it re-diagonalizes a
+  small accumulated-energy "core" matrix every step using this crate's own
+  `eigh_jacobi_full`, extending the tracked basis whenever a new column's
+  residual signals a genuinely new direction. Verified against a direct
+  batch SVD (not an external reference): with no forced truncation,
+  singular values, basis orthogonality, and subspace agreement all land at
+  `~1e-15`, essentially exact. The actual point: a stream whose true rank
+  grows from `2` to `3` partway through makes the tracker's rank grow in
+  response, correctly capturing the new direction. See the 0.40.0 section
+  below.
+- **Robustness/frontier-benchmark program, cycle 6 (final) — isolated
+  LAPACK/MPFR comparison (`compare/`):** `0.41.0` closes the program's
+  last open item without compromising this crate's own zero-heavy-
+  dependency design: a completely separate Cargo package (own
+  `[workspace]` marker, own `Dockerfile`, reaches the main crate only via a
+  read-only `path = ".."` dependency) that runs this crate's own solver
+  against real production LAPACK (`dgesdd`, via `ndarray-linalg`) and
+  200-bit MPFR (via `rug`). Verified, not just asserted: after building and
+  running it, the main crate's own `Cargo.lock` contains zero references to
+  any of `compare/`'s dependencies, and `cargo test` here is unaffected
+  (157/157, unchanged). On well-conditioned matrices this crate agrees with
+  LAPACK to `~1e-12`-`~1e-13` relative singular-value accuracy; on Hilbert
+  and Vandermonde (past `f64`'s representable condition-number range, per
+  `0.34.0`/`0.36.0`) the two solvers disagree substantially on the smallest
+  singular values (`~16x` on Hilbert `n=32`) — external confirmation, not a
+  bug, of what those earlier cycles already predicted: past that point,
+  both solvers are recovering noise, and independent noise floors have no
+  reason to agree. MPFR quantifies the same phenomenon from a different
+  angle, solver-independently: plain `f64`'s Hilbert-matrix determinant is
+  already `~5.4%` off a 200-bit reference by `n=12`. See `compare/README.md`
+  and the 0.41.0 section below.
+
+Eight cycles across `0.34.0`-`0.41.0` closes this robustness/frontier-
+benchmark program: standard "evil matrix" benchmarks, the rest of the
+Higham set plus an Amari parametric grid, self-contained robustness
+properties (dynamic range, subnormals, rotor drift), classical ill-posed
+inverse problems, a quantum many-body benchmark, Lyapunov spectrum
+extraction, streaming low-rank tracking, and this external-reference
+comparison — each cycle scoping explicitly what it would and wouldn't
+attempt, rather than silently dropping or silently overreaching.
 
 The important practical lesson so far is restraint: the geometric methods are
 most useful on structured, balanced-degenerate, and causal/Jordan-like cases.
@@ -421,11 +640,82 @@ keeps the simpler fast path.
   own `profiles::Profile::ExtremeIllConditioned`/`DegenerateSpectrum`
   (which already carried exact imposed `sigma_ref`) into real `cargo test`
   assertions for the first time, rather than only `stress_cpu`'s CLI
-  display. No LAPACK/BLAS/faer reference SVD is used, by this crate's own
-  design — see the module's own doc comment for exactly what ground truth
-  each benchmark uses instead, and what remains explicitly scoped out
-  (SuiteSparse, Cardoso's EEG/MEG datasets, Trefethen pseudospectra) rather
-  than silently skipped.
+  display. `0.36.0` opens a robustness/frontier-benchmark program on top of
+  this: `vandermonde_matrix`, `ginibre_matrix` (self-consistency);
+  `marchenko_pastur_matrix` (checked against the real MP-edge law, upper
+  edge to `~2.5-4%`); extreme dynamic range (`~1e-150` to `~1e150`) and
+  subnormal-scale-entry matrices (a named, concrete underflow risk in
+  `newton_schulz_polar`'s norm-based scaling — measured, absorbed cleanly,
+  not just asserted safe); and orthogonality/unitarity drift under `1e7`
+  sequential rotor updates (real `~1.4e-11`, complex `~3.7e-12`, reusing
+  `lie_svd_complex::complex_unitarity_error`). No LAPACK/BLAS/faer reference
+  SVD is used anywhere in the main crate, by design — see the module's own
+  doc comment for exactly what ground truth each benchmark uses instead,
+  and what remains explicitly scoped out (SuiteSparse, Cardoso's EEG/MEG
+  datasets, Trefethen pseudospectra, and — as of `0.36.0` — a planned but
+  not-yet-built isolated LAPACK/MPFR comparison harness, deliberately kept
+  out of this crate's own dependency tree) rather than silently skipped.
+  `0.37.0` adds `heat_problem`/`phillips_problem`/`shaw_problem` (classical
+  ill-posed first-kind Fredholm inverse problems, built from the
+  most-confidently-known parts of Hansen's construction rather than an
+  unverifiable bit-exact reproduction) and `truncated_svd_solve`, which
+  demonstrates the actual point of that problem class directly: naive
+  full-rank inversion of `heat`/`shaw` (severely ill-posed) explodes
+  (`~78x`/`~73x` the true solution's norm), while `phillips` (only
+  moderately conditioned) needs no truncation at all. `0.38.0` adds
+  `hubbard_dimer_hamiltonian`/`hubbard_dimer_eigenvalues`: the 2-site
+  Hubbard model in its `N=2,S_z=0` sector, with a from-scratch-derived,
+  cross-checked closed-form spectrum (verified against
+  `lie_svd_small::eigh_jacobi_full` to `<1e-14`) — chosen over a full
+  multi-site Fock-space construction specifically to avoid unverifiable
+  fermionic-sign risk. At `u=1e-12` its two smallest eigenvalues (`0` and
+  `u`) are a real, physically motivated near-degenerate gap, resolved as
+  distinct (`~8e-5` relative error on the tiny one, limited by the
+  matrix's own precision floor, not a solver defect).
+- `lie_svd_lyapunov`: `0.39.0`, Lyapunov spectrum extraction via the
+  standard "continuous QR" method (Benettin et al. 1980) — the first cycle
+  of the robustness/frontier-benchmark program that's a genuinely new
+  numerical subsystem, not a benchmark of existing solvers. Propagates the
+  augmented `(state, tangent-frame)` system with this crate's own RK4,
+  periodically re-orthogonalizes the frame via QR, accumulates the log of
+  `R`'s diagonal. Applied to the Lorenz-96 chaotic model
+  (`lorenz96_rhs`/`lorenz96_jacobian`, the latter checked against finite
+  differences); Kuramoto-Sivashinsky was scoped out (a 4th-order stiff PDE
+  needs a spectral discretization and stable implicit-explicit
+  time-stepping this cycle's budget couldn't verify properly — deferred,
+  not dropped). Verified without citing an external literature value: the
+  sum of all Lyapunov exponents equals the time-averaged trace of the
+  Jacobian (a rigorous theorem), which for Lorenz-96 is exactly `-K` for
+  every state — measured sum `-9.999993` against the exact `-10` target at
+  `K=10`, tracked-frame orthogonality error `5.5e-16`.
+- `lie_svd_streaming`: `0.40.0`, streaming/incremental low-rank tracking
+  with rank adaptation ("rank jumps") — the second genuinely new numerical
+  subsystem in the robustness/frontier-benchmark program, processing a
+  data stream one column at a time rather than recomputing a full SVD from
+  scratch. Rather than reproducing Brand's exact rank-1 SVD-update formula
+  from memory, `StreamingTracker` maintains an orthonormal basis plus a
+  small accumulated-energy "core" matrix, re-diagonalized every step with
+  this crate's own `eigh_jacobi_full` (promoted to `pub(crate)` in `0.38.0`
+  and reused here too), extending the basis whenever a new column's
+  projection residual signals a genuinely new direction. Verified against
+  a direct batch SVD (`LieSvdSmall::solve_rectangular`), not an external
+  reference: with no forced truncation, singular values/orthogonality/
+  subspace agreement all land at `~1e-15`. The point: a stream whose true
+  rank grows from `2` to `3` partway through makes the tracked rank grow
+  in response, correctly capturing the new direction (residual `<1e-6`).
+- `compare/`: `0.41.0`, an isolated LAPACK/MPFR ground-truth comparison
+  harness — a *separate* Cargo package (own `[workspace]` marker, own
+  `Dockerfile`, `path = ".."` dependency on the main crate) so real
+  production LAPACK (`ndarray-linalg`, `dgesdd`) and 200-bit MPFR (`rug`)
+  never appear in this crate's own `Cargo.lock` or build. Runs this crate's
+  own solver against `dgesdd` on the benchmark matrices from
+  `lie_svd_benchmarks` (agreement `~1e-12`-`~1e-13` on well-conditioned
+  cases; large, *expected* disagreement on Hilbert/Vandermonde past `f64`'s
+  representable range, confirming rather than contradicting `0.34.0`'s and
+  `0.36.0`'s own findings) and computes the Hilbert matrix's determinant at
+  200-bit precision (plain `f64` already `~5.4%` off by `n=12`, a
+  solver-independent representation-error measurement). See
+  `compare/README.md` for the full numbers and how to build it.
 - `lie_svd_subspace_jade`: `0.32.0`, `Subspace-Coupled JADE` — generalizes
   `lie_svd_joint` to a family of matrices (`SubspaceMatrix`, each with its
   own size and a `Vec<usize>` mapping local rows/columns to global generator
