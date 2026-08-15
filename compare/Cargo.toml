@@ -1,0 +1,25 @@
+[package]
+name = "lie_svd_reference_compare"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Isolated LAPACK/MPFR ground-truth comparison harness for lie_cliffalg_analog_svd. Not part of the main crate's dependency tree -- see its own README.md."
+
+# Marks this as its own workspace root so Cargo does not pull it (and its
+# LAPACK/MPFR dependencies) into the parent crate's workspace, which has no
+# [workspace] table of its own and must stay dependency-free of this.
+[workspace]
+
+[dependencies]
+lie_cliffalg_analog_svd = { path = ".." }
+ndarray = "0.15"
+ndarray-linalg = { version = "0.16", default-features = false, features = ["openblas-system"] }
+# openblas-build (a build-dependency of openblas-src, pulled in regardless
+# of the "system" vs "static" choice) hard-requires the "rustls" or
+# "native-tls" feature just to *compile*, even though the "system" runtime
+# path below never exercises its download/build code. Adding "rustls"
+# explicitly here (unified with lax's own openblas-src edge) satisfies that
+# compile-time requirement without changing which OpenBLAS actually gets
+# linked (still the system one, via "system" below).
+openblas-src = { version = "0.10", default-features = false, features = ["system", "rustls"] }
+rug = "1"
