@@ -88,6 +88,8 @@ impl LieSvdHybrid {
     }
 
     /// Same solver with a trace for benchmarks and release diagnostics.
+    // Allow: the return type mirrors this crate's established (U, Sigma, Vt[, Trace]) tuple convention; a type alias would obscure the shape at call sites during this stability freeze.
+    #[allow(clippy::type_complexity)]
     pub fn solve_with_trace(
         mat: &Array2<f64>,
         params: LieSvdHybridParams,
@@ -436,9 +438,9 @@ fn axis_direct_coupling(work: &Array2<f64>, axis: usize) -> f64 {
 }
 
 fn update_direct_locks(work: &Array2<f64>, active: &mut [bool], threshold: f64) {
-    for axis in 0..work.nrows() {
-        if active[axis] && axis_direct_coupling(work, axis) <= threshold {
-            active[axis] = false;
+    for (axis, is_active) in active.iter_mut().enumerate() {
+        if *is_active && axis_direct_coupling(work, axis) <= threshold {
+            *is_active = false;
         }
     }
 }

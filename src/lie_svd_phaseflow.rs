@@ -12,8 +12,8 @@
 
 use ndarray::{Array1, Array2};
 
-const GOLDEN_ANGLE: f64 = 2.39996322972865332;
-const GOLDEN_RATIO: f64 = 1.6180339887498948;
+const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653_5;
+const GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LieSvdPhaseFlowParams {
@@ -627,6 +627,8 @@ impl LieSvdPhaseFlow {
         Self::solve_with_trace(mat, params).0
     }
 
+    // Allow: the return type mirrors this crate's established (U, Sigma, Vt[, Trace]) tuple convention; a type alias would obscure the shape at call sites during this stability freeze.
+    #[allow(clippy::type_complexity)]
     pub fn solve_with_trace(
         mat: &Array2<f64>,
         params: LieSvdPhaseFlowParams,
@@ -637,6 +639,8 @@ impl LieSvdPhaseFlow {
         Self::phase_lock_with_trace(mat, params)
     }
 
+    // Allow: the return type mirrors this crate's established (U, Sigma, Vt[, Trace]) tuple convention; a type alias would obscure the shape at call sites during this stability freeze.
+    #[allow(clippy::type_complexity)]
     pub fn solve_with_digital_polish(
         mat: &Array2<f64>,
         params: LieSvdPhaseFlowParams,
@@ -658,6 +662,8 @@ impl LieSvdPhaseFlow {
         Self::phase_lock_with_trace(mat, params).1.mzi_phases
     }
 
+    // Allow: the return type mirrors this crate's established (U, Sigma, Vt[, Trace]) tuple convention; a type alias would obscure the shape at call sites during this stability freeze.
+    #[allow(clippy::type_complexity)]
     pub fn phase_lock_with_trace(
         mat: &Array2<f64>,
         params: LieSvdPhaseFlowParams,
@@ -937,8 +943,8 @@ impl LieSvdPhaseFlow {
                     flush_bottleneck_cache_updates(
                         bottleneck_cache.as_mut(),
                         &core,
-                        &row_phase,
-                        &col_phase,
+                        row_phase,
+                        col_phase,
                         &mut bottleneck_touched,
                     );
                 }
@@ -947,14 +953,14 @@ impl LieSvdPhaseFlow {
                 } else {
                     bottleneck_pairs(
                         &core,
-                        &row_phase,
-                        &col_phase,
+                        row_phase,
+                        col_phase,
                         params.bottleneck_pairs,
                         pair_tol,
                         params.active_set_alpha,
                     )
                 };
-                let background_energy = mean_axis_stress(&row_phase, &col_phase);
+                let background_energy = mean_axis_stress(row_phase, col_phase);
                 for pair in candidates {
                     if pair_offdiag(&core, pair.i, pair.j) <= pair_tol {
                         continue;
@@ -1007,8 +1013,8 @@ impl LieSvdPhaseFlow {
             }
             let candidates = active_phase_pairs(
                 &core,
-                &row_phase,
-                &col_phase,
+                row_phase,
+                col_phase,
                 params.active_axes,
                 pair_tol,
                 params.active_set_alpha,
@@ -1198,6 +1204,8 @@ impl LieSvdPhaseFlow {
         )
     }
 
+    // Allow: the return type mirrors this crate's established (U, Sigma, Vt[, Trace]) tuple convention; a type alias would obscure the shape at call sites during this stability freeze.
+    #[allow(clippy::type_complexity)]
     pub fn phase_lock_rectangular_with_trace(
         mat: &Array2<f64>,
         params: LieSvdPhaseFlowParams,
@@ -1329,7 +1337,7 @@ impl LieSvdPhaseFlow {
             col_phases_into(&core, &mut col_phase_buf);
             let row_phase = &row_phase_buf;
             let col_phase = &col_phase_buf;
-            let before_stress = summarize_stress(&row_phase, &col_phase);
+            let before_stress = summarize_stress(row_phase, col_phase);
             samples.push((before_pass, before_stress));
             if before_stress <= resonance_tol {
                 break;
@@ -1420,8 +1428,8 @@ impl LieSvdPhaseFlow {
                     flush_bottleneck_cache_updates(
                         bottleneck_cache.as_mut(),
                         &core,
-                        &row_phase,
-                        &col_phase,
+                        row_phase,
+                        col_phase,
                         &mut bottleneck_touched,
                     );
                 }
@@ -1435,14 +1443,14 @@ impl LieSvdPhaseFlow {
                 } else {
                     bottleneck_pairs(
                         &core,
-                        &row_phase,
-                        &col_phase,
+                        row_phase,
+                        col_phase,
                         params.bottleneck_pairs.min(corridor),
                         pair_tol,
                         params.active_set_alpha,
                     )
                 };
-                let background_energy = mean_axis_stress(&row_phase, &col_phase);
+                let background_energy = mean_axis_stress(row_phase, col_phase);
                 for pair in candidates {
                     if pair_offdiag(&core, pair.i, pair.j) <= pair_tol {
                         continue;
@@ -1496,8 +1504,8 @@ impl LieSvdPhaseFlow {
 
             for pair in active_rectangular_corridor_pairs(
                 &core,
-                &row_phase,
-                &col_phase,
+                row_phase,
+                col_phase,
                 params.active_axes.min(corridor),
                 pair_tol,
                 params.active_set_alpha,
@@ -2065,7 +2073,7 @@ fn causal_antispin_pair_angles(
     let layer_limit = annealed_limit(limit, depth);
     let diff = wrap_two_pi((j as f64 - i as f64) * GOLDEN_ANGLE * harmonic);
     let sign = if causal_bias >= 0.0 { 1.0 } else { -1.0 };
-    let chirality = if depth % 2 == 0 { 1.0 } else { -1.0 };
+    let chirality = if depth.is_multiple_of(2) { 1.0 } else { -1.0 };
     let theta = clamp_angle(
         layer_limit * causal_bias.abs().min(1.0) * diff.sin(),
         layer_limit,
@@ -2269,6 +2277,12 @@ fn effective_prespin_depth(
         return base;
     }
     let stress_ratio = initial_phase_stress / ref_norm.max(1.0);
+    // The two branches below currently share the same depth-boost body by
+    // design, not oversight: a strong causal bias and a high stress ratio
+    // are different triggers that both warrant the same extra pre-spin
+    // depth once either fires. Not merged with `||` to keep each trigger's
+    // condition independently readable/tunable.
+    #[allow(clippy::if_same_then_else)]
     let suggested = if causal_bias.abs() >= params.causal_antispin_threshold {
         if dimension >= 64 {
             3
@@ -2695,6 +2709,8 @@ fn quantize_phase_angle(theta: f64, levels: usize) -> f64 {
     (theta / step).round() * step
 }
 
+// Allow: internal hot-path/state-threading signature; restructuring risks introducing bugs in already-verified numerical code during this stability freeze.
+#[allow(clippy::too_many_arguments)]
 fn accept_offdiag_rotor(
     core: &mut Array2<f64>,
     u_basis: &mut Array2<f64>,
@@ -2766,8 +2782,8 @@ fn select_surgery_axes(rows: &[AxisPhase], cols: &[AxisPhase]) -> [usize; 4] {
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut out = [0usize; 4];
-    for k in 0..4 {
-        out[k] = axes.get(k).copied().unwrap_or(k);
+    for (k, out_k) in out.iter_mut().enumerate() {
+        *out_k = axes.get(k).copied().unwrap_or(k);
     }
     out.sort_unstable();
     out
@@ -3004,7 +3020,7 @@ fn local_pair_svd_angles(work: &Array2<f64>, i: usize, j: usize) -> (f64, f64) {
 }
 
 fn round_robin_layer_count(n: usize) -> usize {
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         n.saturating_sub(1)
     } else {
         n
@@ -3012,7 +3028,7 @@ fn round_robin_layer_count(n: usize) -> usize {
 }
 
 fn layer_pairs(n: usize, layer: usize) -> Vec<(usize, usize)> {
-    let m = if n % 2 == 0 { n } else { n + 1 };
+    let m = if n.is_multiple_of(2) { n } else { n + 1 };
     let ring = m - 1;
     let mut pairs = Vec::with_capacity(m / 2);
     for k in 0..(m / 2) {
